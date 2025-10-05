@@ -532,9 +532,3 @@ MonoBehaviour:
   - tid: "TID_\u6C37\u306E\u9818\u57DF"
     name: MTID_IceTile
     color: {r: 0, g: 0, b: 1, a: 1}
-  - tid: TID_SEA069
-    name: MTID_Sea
-    color: {r: 0, g: 0, b: 1, a: 1}
-  - tid: TID_HILL069
-    name: MTID_Mountain
-    color: {r: 1, g: 0.5019608, b: 0, a: 1}

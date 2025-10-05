@@ -444,13 +444,8 @@ namespace DivineDragon.MapTools
             selectedTerrain.m_Terrains = newTerrains;
             
             MarkTerrainDirty(selectedTerrain);
-            
-            // Clear caches
-            islandCache.Clear();
-            lastCachedTerrain = null;
-            cachedHoverRegion = null;
             s_LabelNodes.Clear();
-            
+
             SceneView.RepaintAll();
             Debug.Log($"Terrain resized from {oldWidth}x{oldHeight} to {newTerrainWidth}x{newTerrainHeight}");
         }
@@ -484,13 +479,8 @@ namespace DivineDragon.MapTools
             
             selectedTerrain.m_Terrains = mirrored;
             MarkTerrainDirty(selectedTerrain);
-            
-            // Clear caches
-            islandCache.Clear();
-            lastCachedTerrain = null;
-            cachedHoverRegion = null;
             s_LabelNodes.Clear();
-            
+
             SceneView.RepaintAll();
             Debug.Log("Terrain mirrored horizontally");
         }
@@ -524,11 +514,6 @@ namespace DivineDragon.MapTools
             
             selectedTerrain.m_Terrains = mirrored;
             MarkTerrainDirty(selectedTerrain);
-            
-            // Clear caches
-            islandCache.Clear();
-            lastCachedTerrain = null;
-            cachedHoverRegion = null;
             s_LabelNodes.Clear();
             
             SceneView.RepaintAll();
@@ -571,11 +556,6 @@ namespace DivineDragon.MapTools
             
             selectedTerrain.m_Terrains = shifted;
             MarkTerrainDirty(selectedTerrain);
-            
-            // Clear caches
-            islandCache.Clear();
-            lastCachedTerrain = null;
-            cachedHoverRegion = null;
             s_LabelNodes.Clear();
             
             SceneView.RepaintAll();
@@ -618,11 +598,6 @@ namespace DivineDragon.MapTools
             
             selectedTerrain.m_Terrains = shifted;
             MarkTerrainDirty(selectedTerrain);
-            
-            // Clear caches
-            islandCache.Clear();
-            lastCachedTerrain = null;
-            cachedHoverRegion = null;
             s_LabelNodes.Clear();
             
             SceneView.RepaintAll();

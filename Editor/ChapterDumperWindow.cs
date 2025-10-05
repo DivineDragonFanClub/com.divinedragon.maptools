@@ -17,6 +17,7 @@ namespace DivineDragon.MapTools
         private const string GameDataRoot = "/Users/doge/Documents/clean_engage_200/Data/StreamingAssets/aa/Switch";
         private const string GameDataAssetRoot = GameDataRoot + "/fe_assets_gamedata";
         private const string GameDataShareAssetPath = "Assets/Share/Addressables/Patch/Patch3/GameData";
+        private const string TerrainXmlBundlePath = GameDataAssetRoot + "/terrain.xml.bundle";
         private const string TerrainDirectory = GameDataAssetRoot + "/terrains";
         private const string DisposDirectory = GameDataAssetRoot + "/dispos";
 
@@ -26,7 +27,8 @@ namespace DivineDragon.MapTools
             new SupportAsset(GameDataShareAssetPath + "/Person.xml", GameDataAssetRoot + "/person.xml.bundle"),
             new SupportAsset(GameDataShareAssetPath + "/Job.xml", GameDataAssetRoot + "/job.xml.bundle"),
             new SupportAsset(GameDataShareAssetPath + "/Item.xml", GameDataAssetRoot + "/item.xml.bundle"),
-            new SupportAsset(GameDataShareAssetPath + "/Skill.xml", GameDataAssetRoot + "/skill.xml.bundle")
+            new SupportAsset(GameDataShareAssetPath + "/Skill.xml", GameDataAssetRoot + "/skill.xml.bundle"),
+            new SupportAsset(TerrainTypeDatabase.TerrainXmlAssetRelativePath, TerrainXmlBundlePath)
         };
 
         private readonly List<ChapterRecord> chapters = new List<ChapterRecord>();

@@ -1,4 +1,6 @@
+using System;
 using System.Collections.Generic;
+using System.IO;
 using UnityEngine;
 using UnityEditor;
 
@@ -8,6 +10,24 @@ namespace DivineDragon.MapTools
     public class TerrainTypeDatabase : ScriptableObject
     {
         private const string DatabaseGuid = "de9b9da0a76f2450ea1508609dc66d99";
+        internal const string TerrainXmlAssetRelativePath = "Assets/Share/Addressables/Patch/Patch3/GameData/Terrain.xml";
+
+        private static string projectRootPath;
+        private static string terrainXmlProjectPath;
+        private static bool pathsInitialized;
+
+        internal static string TerrainXmlProjectFullPath
+        {
+            get
+            {
+                EnsurePathsInitialized();
+                return terrainXmlProjectPath;
+            }
+        }
+
+        private static DateTime lastSourceWriteTimeUtc = DateTime.MinValue;
+        private static long lastSourceFileSize = -1;
+        private static bool warnedMissingXml;
 
         [SerializeField]
         private List<TerrainType> terrainTypes = new List<TerrainType>();
@@ -33,34 +53,32 @@ namespace DivineDragon.MapTools
         {
             get
             {
-                if (instance == null)
-                {
-                    string path = AssetPath;
-                    if (!string.IsNullOrEmpty(path))
-                    {
-                        instance = AssetDatabase.LoadAssetAtPath<TerrainTypeDatabase>(path);
-                    }
-                    
-                    if (instance == null)
-                    {
-                        Debug.LogWarning("TerrainTypeDatabase asset not found. Run the terrain parser to generate it.");
-                    }
-                }
+                EnsurePathsInitialized();
+                instance ??= LoadOrCreateInstance();
+                instance?.EnsureLoadedFromTerrainXml();
                 return instance;
             }
         }
-        
-        public void Initialize(List<TerrainType> types)
+
+        public void Initialize(List<TerrainType> types, bool markDirty = true)
         {
-            terrainTypes = types;
+            terrainTypes = types ?? new List<TerrainType>();
             RebuildLookup();
-            EditorUtility.SetDirty(this);
-            AssetDatabase.SaveAssets();
+            if (markDirty)
+            {
+                EditorUtility.SetDirty(this);
+                AssetDatabase.SaveAssets();
+            }
         }
-        
+
         private void RebuildLookup()
         {
             tidLookup = new Dictionary<string, TerrainType>();
+            if (terrainTypes == null)
+            {
+                return;
+            }
+
             foreach (var terrain in terrainTypes)
             {
                 if (!string.IsNullOrEmpty(terrain.tid))
@@ -69,7 +87,98 @@ namespace DivineDragon.MapTools
                 }
             }
         }
-        
+
+        private static TerrainTypeDatabase LoadOrCreateInstance()
+        {
+            string assetPath = AssetPath;
+            TerrainTypeDatabase database = null;
+
+            if (!string.IsNullOrEmpty(assetPath))
+            {
+                database = AssetDatabase.LoadAssetAtPath<TerrainTypeDatabase>(assetPath);
+            }
+
+            if (database != null)
+            {
+                return database;
+            }
+
+            database = CreateInstance<TerrainTypeDatabase>();
+            database.hideFlags = HideFlags.HideAndDontSave;
+            return database;
+        }
+
+        private void EnsureLoadedFromTerrainXml()
+        {
+            EnsurePathsInitialized();
+
+            if (string.IsNullOrEmpty(terrainXmlProjectPath))
+            {
+                return;
+            }
+
+            if (!File.Exists(terrainXmlProjectPath))
+            {
+                if (!warnedMissingXml)
+                {
+                    Debug.LogWarning($"Terrain XML not found at '{terrainXmlProjectPath}'. Extract terrain.xml.bundle via the Chapter Dumper before opening terrain tools.");
+                    warnedMissingXml = true;
+                }
+                return;
+            }
+
+            warnedMissingXml = false;
+
+            FileInfo fileInfo = new FileInfo(terrainXmlProjectPath);
+
+            bool hasExistingData = terrainTypes != null && terrainTypes.Count > 0;
+            if (hasExistingData && fileInfo.LastWriteTimeUtc == lastSourceWriteTimeUtc && fileInfo.Length == lastSourceFileSize)
+            {
+                return;
+            }
+
+            if (!TerrainXmlLoader.TryLoadTerrainTypes(terrainXmlProjectPath, out List<TerrainType> parsedTerrains, out string error))
+            {
+                Debug.LogError($"Failed to load terrain definitions: {error}");
+                return;
+            }
+
+            bool markDirty = AssetDatabase.Contains(this);
+            Initialize(parsedTerrains, markDirty);
+
+            lastSourceWriteTimeUtc = fileInfo.LastWriteTimeUtc;
+            lastSourceFileSize = fileInfo.Length;
+        }
+
+        private static string ResolveProjectPath(string relativePath)
+        {
+            EnsurePathsInitialized();
+
+            if (string.IsNullOrEmpty(relativePath))
+            {
+                return projectRootPath;
+            }
+
+            return Path.Combine(projectRootPath, relativePath).Replace("\\", "/");
+        }
+
+        private static void EnsurePathsInitialized()
+        {
+            if (pathsInitialized)
+            {
+                return;
+            }
+
+            string assetsPath = Application.dataPath;
+            string root = Path.GetDirectoryName(assetsPath);
+            projectRootPath = string.IsNullOrEmpty(root) ? assetsPath : root.Replace("\\", "/");
+            terrainXmlProjectPath = string.IsNullOrEmpty(TerrainXmlAssetRelativePath)
+                ? projectRootPath
+                : Path.Combine(projectRootPath, TerrainXmlAssetRelativePath).Replace("\\", "/");
+
+            pathsInitialized = true;
+        }
+
         public TerrainType GetTerrainType(string tid)
         {
             if (tidLookup == null)
@@ -96,12 +205,12 @@ namespace DivineDragon.MapTools
             var terrain = GetTerrainType(tid);
             return terrain != null ? terrain.name : tid;
         }
-        
+
         public List<TerrainType> GetAllTerrainTypes()
         {
-            return new List<TerrainType>(terrainTypes);
+            return terrainTypes != null ? new List<TerrainType>(terrainTypes) : new List<TerrainType>();
         }
-        
-        public int Count => terrainTypes.Count;
+
+        public int Count => terrainTypes?.Count ?? 0;
     }
 }

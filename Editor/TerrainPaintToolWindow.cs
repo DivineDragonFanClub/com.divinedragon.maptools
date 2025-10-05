@@ -228,12 +228,6 @@ namespace DivineDragon.MapTools
         
         private const string PREFS_PREFIX = "TerrainPaintTool_";
         
-        // Per-frame hover connected-region cache
-        private static HashSet<Vector2Int> cachedHoverRegion = null;
-        private static Vector2Int cachedHoverTileForRegion = new Vector2Int(-1, -1);
-        private static int cachedRegionWidth = -1;
-        private static int cachedRegionHeight = -1;
-        private static TerrainAssetAdapter cachedRegionTerrain = null;
         private const string PREFS_ENABLED = PREFS_PREFIX + "Enabled";
         private const string PREFS_SHOW_GRID = PREFS_PREFIX + "ShowGrid";
         private const string PREFS_TEXT_SIZE = PREFS_PREFIX + "TextSize";
@@ -290,9 +284,9 @@ namespace DivineDragon.MapTools
             // This ensures borders are recalculated after terrain changes
             islandCache.Clear();
             lastCachedTerrain = null;
-            cachedHoverRegion = null;
             s_LabelNodes.Clear();
             TerrainVirtualGridCache.ClearAll();
+            TerrainRegionCache.ClearAll();
             SceneView.RepaintAll();
             if (instance != null)
             {
@@ -303,13 +297,18 @@ namespace DivineDragon.MapTools
         private void LoadTerrainDatabase()
         {
             terrainDatabase = TerrainTypeDatabase.Instance;
-            if (terrainDatabase == null)
+            if (terrainDatabase == null || terrainDatabase.Count == 0)
             {
-                Debug.LogWarning("TerrainTypeDatabase not found. Run 'Tools/Parse Terrain XML' to create it.");
+                terrainDatabase = null;
+                Debug.LogWarning($"No terrain definitions loaded. Extract terrain.xml.bundle so that '{TerrainTypeDatabase.TerrainXmlAssetRelativePath}' is available.");
+                return;
             }
-            else
+
+            terrainColorCache.Clear();
+
+            if (IsEmptyTerrain(selectedBrushTerrain))
             {
-                terrainColorCache.Clear();
+                selectedBrushTerrain = string.Empty;
             }
         }
         
@@ -393,11 +392,7 @@ namespace DivineDragon.MapTools
             {
                 islandCache.Remove(terrain);
                 InvalidateVirtualGrid(terrain);
-                if (cachedRegionTerrain == terrain)
-                {
-                    cachedRegionTerrain = null;
-                    cachedHoverRegion = null;
-                }
+                TerrainRegionCache.Invalidate(terrain);
             }
         }
 
@@ -443,10 +438,9 @@ namespace DivineDragon.MapTools
             if (!string.IsNullOrEmpty(terrainPath))
             {
                 selectedTerrain = TerrainAssetAdapter.Load(terrainPath);
-                cachedHoverRegion = null;
-                cachedRegionTerrain = null;
                 lastCachedTerrain = null;
                 InvalidateVirtualGrid(selectedTerrain);
+                TerrainRegionCache.ClearAll();
                 s_LabelNodes.Clear();
                 labelAlphaStates.Clear();
             }
@@ -549,10 +543,9 @@ namespace DivineDragon.MapTools
                 if (EditorGUI.EndChangeCheck())
                 {
                     selectedTerrain = TerrainAssetAdapter.FromObject(newAsset);
-                    cachedHoverRegion = null;
-                    cachedRegionTerrain = null;
                     lastCachedTerrain = null;
                     InvalidateVirtualGrid(selectedTerrain);
+                    TerrainRegionCache.ClearAll();
                     s_LabelNodes.Clear();
                     labelAlphaStates.Clear();
                     for (int i = 0; i < availableTerrains.Count; i++)
@@ -674,10 +667,10 @@ namespace DivineDragon.MapTools
                             // Make sure we have a default terrain selected
                             if (IsEmptyTerrain(selectedBrushTerrain) && terrainDatabase != null)
                             {
-                                var allTypes = terrainDatabase.GetAllTerrainTypes();
-                                if (allTypes.Count > 0)
+                                var paintableTerrains = GetPaintableTerrains();
+                                if (paintableTerrains.Count > 0)
                                 {
-                                    selectedBrushTerrain = allTypes[0].tid;
+                                    selectedBrushTerrain = paintableTerrains[0].tid;
                                 }
                             }
                         }
@@ -792,8 +785,8 @@ namespace DivineDragon.MapTools
                             }
                         }
                         
-                        var allTypes = terrainDatabase.GetAllTerrainTypes();
-                        
+                        var allTypes = GetPaintableTerrains();
+
                         // Used Terrains Section
                         if (usedTerrains.Count > 0)
                         {
@@ -829,7 +822,7 @@ namespace DivineDragon.MapTools
                             {
                                 continue;
                             }
-                            
+
                             DrawTerrainButton(terrain, usedTerrains.Contains(terrain.tid));
                         }
                         
@@ -1008,7 +1001,7 @@ namespace DivineDragon.MapTools
                     {
                         if (hoveredTerrainIdForHighlight == selectedBrushTerrain)
                         {
-                            currentHighlightRegion = GetHoverConnectedRegion(selectedTerrain, hoveredTile, width, height);
+                            currentHighlightRegion = GetHoverConnectedRegion(selectedTerrain, currentGrid, hoveredTile, width, height);
                             highlightTerrainId = selectedBrushTerrain;
                         }
                         else
@@ -1037,7 +1030,7 @@ namespace DivineDragon.MapTools
                     }
                     else if (!paintMode && !IsEmptyTerrain(hoveredTerrainIdForHighlight))
                     {
-                        currentHighlightRegion = GetHoverConnectedRegion(selectedTerrain, hoveredTile, width, height);
+                        currentHighlightRegion = GetHoverConnectedRegion(selectedTerrain, currentGrid, hoveredTile, width, height);
                         highlightTerrainId = hoveredTerrainIdForHighlight;
                     }
                 }
@@ -1241,21 +1234,19 @@ namespace DivineDragon.MapTools
         private static int paintUndoGroup = -1;
         private static HashSet<int> paintedIndicesThisDrag = new HashSet<int>();
 
-        private static HashSet<Vector2Int> GetHoverConnectedRegion(TerrainAssetAdapter terrain, Vector2Int tile, int width, int height)
+        private static HashSet<Vector2Int> GetHoverConnectedRegion(
+            TerrainAssetAdapter terrain,
+            TerrainVirtualGrid grid,
+            Vector2Int tile,
+            int width,
+            int height)
         {
-            if (terrain == null) return null;
-            if (cachedHoverRegion != null && cachedRegionTerrain == terrain &&
-                cachedHoverTileForRegion == tile && cachedRegionWidth == width && cachedRegionHeight == height)
+            if (terrain == null || grid == null)
             {
-                return cachedHoverRegion;
+                return new HashSet<Vector2Int>();
             }
-            var region = FindConnectedRegion(terrain, tile, width, height);
-            cachedHoverRegion = region;
-            cachedRegionTerrain = terrain;
-            cachedHoverTileForRegion = tile;
-            cachedRegionWidth = width;
-            cachedRegionHeight = height;
-            return region;
+
+            return TerrainRegionCache.GetSameTerrainRegion(terrain, grid, tile, width, height, useCache: true);
         }
 
         private static void RelaxLabelPositions(
@@ -1391,7 +1382,6 @@ namespace DivineDragon.MapTools
 
             if (isMouseOverGrid != prevOver || hoveredTile != prevHovered)
             {
-                cachedHoverRegion = null;
                 SceneView.RepaintAll();
                 if (instance != null)
                 {
@@ -1444,7 +1434,6 @@ namespace DivineDragon.MapTools
             {
                 selectedTerrain.m_Terrains = tiles;
                 MarkTerrainDirty(selectedTerrain);
-                cachedHoverRegion = null;
                 SceneView.RepaintAll();
             }
         }
@@ -1478,46 +1467,36 @@ namespace DivineDragon.MapTools
                 }
             }
 
-            HashSet<Vector2Int> visited = new HashSet<Vector2Int>();
-            Queue<Vector2Int> toCheck = new Queue<Vector2Int>();
-
+            HashSet<Vector2Int> processedStarts = new HashSet<Vector2Int>();
             foreach (var brushTile in brushArea)
             {
                 foreach (var dir in Directions4)
                 {
-                    var neighbor = brushTile + dir;
-                    if (!brushArea.Contains(neighbor) &&
-                        neighbor.x >= 0 && neighbor.x < width &&
-                        neighbor.y >= 0 && neighbor.y < height &&
-                        !visited.Contains(neighbor))
+                    Vector2Int neighbor = brushTile + dir;
+                    if (brushArea.Contains(neighbor) ||
+                        neighbor.x < 0 || neighbor.x >= width ||
+                        neighbor.y < 0 || neighbor.y >= height)
                     {
-                        string tid = grid.GetTerrainId(neighbor.x, neighbor.y);
-                        if (!IsEmptyTerrain(tid) && tid == targetTerrain)
-                        {
-                            visited.Add(neighbor);
-                            toCheck.Enqueue(neighbor);
-                        }
+                        continue;
                     }
-                }
-            }
 
-            while (toCheck.Count > 0)
-            {
-                var current = toCheck.Dequeue();
-                island.Add(current);
-
-                foreach (var dir in Directions4)
-                {
-                    var neighbor = current + dir;
-                    if (neighbor.x >= 0 && neighbor.x < width &&
-                        neighbor.y >= 0 && neighbor.y < height &&
-                        !visited.Contains(neighbor))
+                    if (!processedStarts.Add(neighbor))
                     {
-                        string tid = grid.GetTerrainId(neighbor.x, neighbor.y);
-                        if (!IsEmptyTerrain(tid) && tid == targetTerrain)
+                        continue;
+                    }
+
+                    string tid = grid.GetTerrainId(neighbor.x, neighbor.y);
+                    if (IsEmptyTerrain(tid) || tid != targetTerrain)
+                    {
+                        continue;
+                    }
+
+                    var neighborRegion = TerrainRegionCache.GetSameTerrainRegion(selectedTerrain, grid, neighbor, width, height, useCache: true);
+                    foreach (var pos in neighborRegion)
+                    {
+                        if (!brushArea.Contains(pos))
                         {
-                            visited.Add(neighbor);
-                            toCheck.Enqueue(neighbor);
+                            island.Add(pos);
                         }
                     }
                 }
@@ -1808,46 +1787,13 @@ namespace DivineDragon.MapTools
         
         private static HashSet<Vector2Int> FindConnectedRegion(TerrainAssetAdapter terrain, Vector2Int startTile, int width, int height)
         {
-            HashSet<Vector2Int> region = new HashSet<Vector2Int>();
-
             TerrainVirtualGrid grid = GetVirtualGrid(terrain);
             if (grid == null)
-                return region;
-
-            string targetTerrain = grid.GetTerrainId(startTile.x, startTile.y);
-            if (IsEmptyTerrain(targetTerrain))
-                return region;
-            
-            Queue<Vector2Int> toVisit = new Queue<Vector2Int>();
-            HashSet<Vector2Int> visited = new HashSet<Vector2Int>();
-            
-            toVisit.Enqueue(startTile);
-            visited.Add(startTile);
-            
-            while (toVisit.Count > 0)
             {
-                Vector2Int current = toVisit.Dequeue();
-                region.Add(current);
-                
-                foreach (var dir in Directions4)
-                {
-                    Vector2Int neighbor = current + dir;
-                    
-                    if (neighbor.x >= 0 && neighbor.x < width &&
-                        neighbor.y >= 0 && neighbor.y < height &&
-                        !visited.Contains(neighbor))
-                    {
-                        string neighborTerrain = grid.GetTerrainId(neighbor.x, neighbor.y);
-                        if (!IsEmptyTerrain(neighborTerrain) && neighborTerrain == targetTerrain)
-                        {
-                            visited.Add(neighbor);
-                            toVisit.Enqueue(neighbor);
-                        }
-                    }
-                }
+                return new HashSet<Vector2Int>();
             }
-            
-            return region;
+
+            return TerrainRegionCache.GetSameTerrainRegion(terrain, grid, startTile, width, height, useCache: false);
         }
         
         private static void DrawRegionHighlight(HashSet<Vector2Int> region, float startX, float startZ, float y, string terrainId)
@@ -2631,6 +2577,18 @@ namespace DivineDragon.MapTools
             GUI.backgroundColor = Color.white;
             
             EditorGUILayout.EndHorizontal();
+        }
+
+        private static List<TerrainType> GetPaintableTerrains()
+        {
+            if (terrainDatabase == null)
+            {
+                return new List<TerrainType>();
+            }
+
+            var terrains = terrainDatabase.GetAllTerrainTypes();
+            terrains.RemoveAll(t => IsEmptyTerrain(t.tid));
+            return terrains;
         }
 
         // Reusable GUI styles
