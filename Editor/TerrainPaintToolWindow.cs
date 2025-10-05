@@ -198,6 +198,112 @@ namespace DivineDragon.MapTools
         private static int relaxLargeIslandTiles = 80;
         private static float relaxPriorityLarge = 1.6f;
         private static float relaxViewportPad = 8f;
+
+        private static readonly HashSet<string> EmptyTerrainIds = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "TID_無し"
+        };
+
+        private class TerrainVirtualGrid
+        {
+            public TerrainAssetAdapter Adapter { get; }
+            public int Width { get; }
+            public int Height { get; }
+
+            private readonly int[] actualIndices;
+            private readonly string[] terrainIds;
+
+            public TerrainVirtualGrid(TerrainAssetAdapter adapter)
+            {
+                Adapter = adapter;
+                Width = adapter.Width;
+                Height = adapter.Height;
+
+                int expectedCount = Mathf.Max(0, Width * Height);
+                actualIndices = new int[expectedCount];
+                terrainIds = new string[expectedCount];
+                for (int i = 0; i < expectedCount; i++)
+                {
+                    actualIndices[i] = -1;
+                    terrainIds[i] = string.Empty;
+                }
+
+                var raw = adapter.m_Terrains ?? Array.Empty<string>();
+                int fill = 0;
+                bool overflow = false;
+                for (int rawIndex = 0; rawIndex < raw.Length; rawIndex++)
+                {
+                    string tid = raw[rawIndex];
+                    if (IsEmptyTerrain(tid))
+                    {
+                        continue;
+                    }
+
+                    if (fill < expectedCount)
+                    {
+                        actualIndices[fill] = rawIndex;
+                        terrainIds[fill] = tid;
+                        fill++;
+                    }
+                    else
+                    {
+                        overflow = true;
+                        break;
+                    }
+                }
+
+                string assetKey = adapter.Asset != null ? AssetDatabase.GetAssetPath(adapter.Asset) : adapter.Name;
+
+                if (fill < expectedCount)
+                {
+                    if (s_LoggedInsufficientTiles.Add(assetKey))
+                    {
+                        Debug.LogWarning($"Terrain '{adapter.Name}' only provided {fill} non-empty tiles but expected {expectedCount}. Remaining slots will be empty.");
+                    }
+                }
+                else if (overflow)
+                {
+                    if (s_LoggedOverflowTiles.Add(assetKey))
+                    {
+                        Debug.LogWarning($"Terrain '{adapter.Name}' has more non-empty tiles than expected ({expectedCount}). Extra tiles will be ignored in the virtual view.");
+                    }
+                }
+            }
+
+            public string GetTerrainId(int x, int y)
+            {
+                int virtualIndex = GetVirtualIndex(x, y);
+                if (virtualIndex < 0)
+                {
+                    return string.Empty;
+                }
+                return terrainIds[virtualIndex];
+            }
+
+            public int GetActualIndex(int x, int y)
+            {
+                int virtualIndex = GetVirtualIndex(x, y);
+                if (virtualIndex < 0)
+                {
+                    return -1;
+                }
+                return actualIndices[virtualIndex];
+            }
+
+            private int GetVirtualIndex(int x, int y)
+            {
+                if (x < 0 || y < 0 || x >= Width || y >= Height)
+                {
+                    return -1;
+                }
+                return y * Width + x;
+            }
+        }
+
+        private static readonly Dictionary<TerrainAssetAdapter, TerrainVirtualGrid> s_VirtualGrids =
+            new Dictionary<TerrainAssetAdapter, TerrainVirtualGrid>();
+        private static readonly HashSet<string> s_LoggedInsufficientTiles = new HashSet<string>();
+        private static readonly HashSet<string> s_LoggedOverflowTiles = new HashSet<string>();
         
         // Camera movement detection
         private static Vector3 lastCameraPosition;
@@ -411,6 +517,40 @@ namespace DivineDragon.MapTools
             return e != null && (e.control || e.command);
         }
 
+        private static bool IsEmptyTerrain(string terrainId)
+        {
+            if (string.IsNullOrEmpty(terrainId))
+            {
+                return true;
+            }
+
+            return EmptyTerrainIds.Contains(terrainId);
+        }
+
+        private static TerrainVirtualGrid GetVirtualGrid(TerrainAssetAdapter terrain)
+        {
+            if (terrain == null)
+            {
+                return null;
+            }
+
+            if (!s_VirtualGrids.TryGetValue(terrain, out TerrainVirtualGrid grid))
+            {
+                grid = new TerrainVirtualGrid(terrain);
+                s_VirtualGrids[terrain] = grid;
+            }
+
+            return grid;
+        }
+
+        private static void InvalidateVirtualGrid(TerrainAssetAdapter terrain)
+        {
+            if (terrain != null)
+            {
+                s_VirtualGrids.Remove(terrain);
+            }
+        }
+
         private static void RecordTerrainUndo(TerrainAssetAdapter terrain, string label)
         {
             if (terrain?.Asset != null)
@@ -424,6 +564,21 @@ namespace DivineDragon.MapTools
             if (terrain?.Asset != null)
             {
                 EditorUtility.SetDirty(terrain.Asset);
+            }
+
+            if (terrain != null)
+            {
+                islandCache.Remove(terrain);
+                InvalidateVirtualGrid(terrain);
+                if (cachedRegionTerrain == terrain)
+                {
+                    cachedRegionTerrain = null;
+                    cachedHoverRegion = null;
+                }
+
+                string assetKey = terrain.Asset != null ? AssetDatabase.GetAssetPath(terrain.Asset) : terrain.Name;
+                s_LoggedInsufficientTiles.Remove(assetKey);
+                s_LoggedOverflowTiles.Remove(assetKey);
             }
         }
 
@@ -469,6 +624,12 @@ namespace DivineDragon.MapTools
             if (!string.IsNullOrEmpty(terrainPath))
             {
                 selectedTerrain = TerrainAssetAdapter.Load(terrainPath);
+                cachedHoverRegion = null;
+                cachedRegionTerrain = null;
+                lastCachedTerrain = null;
+                InvalidateVirtualGrid(selectedTerrain);
+                s_LabelNodes.Clear();
+                labelAlphaStates.Clear();
             }
             
             // Relaxation: committed defaults (no prefs load)
@@ -569,6 +730,12 @@ namespace DivineDragon.MapTools
                 if (EditorGUI.EndChangeCheck())
                 {
                     selectedTerrain = TerrainAssetAdapter.FromObject(newAsset);
+                    cachedHoverRegion = null;
+                    cachedRegionTerrain = null;
+                    lastCachedTerrain = null;
+                    InvalidateVirtualGrid(selectedTerrain);
+                    s_LabelNodes.Clear();
+                    labelAlphaStates.Clear();
                     for (int i = 0; i < availableTerrains.Count; i++)
                     {
                         if (selectedTerrain != null &&
@@ -606,7 +773,7 @@ namespace DivineDragon.MapTools
                     EditorGUILayout.Space(5);
                     EditorGUILayout.HelpBox($"Grid Size: {selectedTerrain.Width} x {selectedTerrain.Height}\n" +
                                            $"Origin: ({selectedTerrain.OriginX}, {selectedTerrain.OriginZ})\n" +
-                                           $"Total Tiles: {selectedTerrain.TerrainCount}", 
+                                           $"Total Tiles: {selectedTerrain.Width * selectedTerrain.Height}", 
                                            MessageType.Info);
                 }
             }
@@ -686,7 +853,7 @@ namespace DivineDragon.MapTools
                         if (paintMode)
                         {
                             // Make sure we have a default terrain selected
-                            if (string.IsNullOrEmpty(selectedBrushTerrain) && terrainDatabase != null)
+                            if (IsEmptyTerrain(selectedBrushTerrain) && terrainDatabase != null)
                             {
                                 var allTypes = terrainDatabase.GetAllTerrainTypes();
                                 if (allTypes.Count > 0)
@@ -701,55 +868,52 @@ namespace DivineDragon.MapTools
                     
                     if (paintMode)
                     {
-                    EditorGUILayout.Space(5);
-                    // Only odd numbers for brush size (1x1, 3x3, 5x5, 7x7)
-                    int brushSteps = (brushSize - 1) / 2;
-                    brushSteps = EditorGUILayout.IntSlider("Brush Size", brushSteps, 0, 3);
-                    brushSize = brushSteps * 2 + 1;
-                    EditorGUILayout.LabelField($"Brush: {brushSize}x{brushSize}", EditorStyles.miniLabel);
-                    
-                    EditorGUILayout.Space(5);
-                    
+                        EditorGUILayout.Space(5);
+                        // Only odd numbers for brush size (1x1, 3x3, 5x5, 7x7)
+                        int brushSteps = (brushSize - 1) / 2;
+                        brushSteps = EditorGUILayout.IntSlider("Brush Size", brushSteps, 0, 3);
+                        brushSize = brushSteps * 2 + 1;
+                        EditorGUILayout.LabelField($"Brush: {brushSize}x{brushSize}", EditorStyles.miniLabel);
+                        
+                        EditorGUILayout.Space(5);
+                        
                     // Status: Hovering over
                     EditorGUILayout.BeginHorizontal();
                     EditorGUILayout.LabelField("Hovering over:", GUILayout.Width(100));
                     string hoveredIdForPanel = null;
-                    if (isMouseOverGrid && selectedTerrain != null)
+                    var hoverGrid = GetVirtualGrid(selectedTerrain);
+                    if (isMouseOverGrid && selectedTerrain != null && hoverGrid != null)
                     {
-                        int idx = hoveredTile.y * selectedTerrain.m_Width + hoveredTile.x;
-                        if (idx >= 0 && selectedTerrain.m_Terrains != null && idx < selectedTerrain.m_Terrains.Length)
-                        {
-                            hoveredIdForPanel = selectedTerrain.m_Terrains[idx];
-                        }
+                        hoveredIdForPanel = hoverGrid.GetTerrainId(hoveredTile.x, hoveredTile.y);
                     }
-                    if (!string.IsNullOrEmpty(hoveredIdForPanel))
-                    {
-                        if (terrainDatabase != null)
+                        if (!IsEmptyTerrain(hoveredIdForPanel))
                         {
-                            Color hColor = terrainDatabase.GetTerrainColor(hoveredIdForPanel, Color.gray);
-                            Rect colorRectH = GUILayoutUtility.GetRect(20, 20, GUILayout.Width(20));
-                            EditorGUI.DrawRect(colorRectH, hColor);
-                            EditorGUI.DrawRect(colorRectH, new Color(0, 0, 0, 0.2f));
-                        }
-                        string displayNameH = hoveredIdForPanel;
-                        if (terrainDatabase != null)
-                        {
-                            var tH = terrainDatabase.GetTerrainType(hoveredIdForPanel);
-                            if (tH != null && !string.IsNullOrEmpty(tH.name) && tH.name != tH.tid)
+                            if (terrainDatabase != null)
                             {
-                                displayNameH = $"{hoveredIdForPanel} ({tH.name})";
+                                Color hColor = terrainDatabase.GetTerrainColor(hoveredIdForPanel, Color.gray);
+                                Rect colorRectH = GUILayoutUtility.GetRect(20, 20, GUILayout.Width(20));
+                                EditorGUI.DrawRect(colorRectH, hColor);
+                                EditorGUI.DrawRect(colorRectH, new Color(0, 0, 0, 0.2f));
                             }
+                            string displayNameH = hoveredIdForPanel;
+                            if (terrainDatabase != null)
+                            {
+                                var tH = terrainDatabase.GetTerrainType(hoveredIdForPanel);
+                                if (tH != null && !string.IsNullOrEmpty(tH.name) && tH.name != tH.tid)
+                                {
+                                    displayNameH = $"{hoveredIdForPanel} ({tH.name})";
+                                }
+                            }
+                            EditorGUILayout.LabelField(displayNameH, EditorStyles.boldLabel);
                         }
-                        EditorGUILayout.LabelField(displayNameH, EditorStyles.boldLabel);
-                    }
-                    else
-                    {
-                        // Draw blank color chip to maintain consistent layout
-                        Rect blankRectH = GUILayoutUtility.GetRect(20, 20, GUILayout.Width(20));
-                        EditorGUI.DrawRect(blankRectH, new Color(0.3f, 0.3f, 0.3f, 0.2f));
-                        EditorGUI.DrawRect(blankRectH, new Color(0, 0, 0, 0.2f));
-                        EditorGUILayout.LabelField("None", EditorStyles.boldLabel);
-                    }
+                        else
+                        {
+                            // Draw blank color chip to maintain consistent layout
+                            Rect blankRectH = GUILayoutUtility.GetRect(20, 20, GUILayout.Width(20));
+                            EditorGUI.DrawRect(blankRectH, new Color(0.3f, 0.3f, 0.3f, 0.2f));
+                            EditorGUI.DrawRect(blankRectH, new Color(0, 0, 0, 0.2f));
+                            EditorGUILayout.LabelField("None", EditorStyles.boldLabel);
+                        }
                     EditorGUILayout.EndHorizontal();
 
                     EditorGUILayout.Space(2);
@@ -758,7 +922,7 @@ namespace DivineDragon.MapTools
                     EditorGUILayout.BeginHorizontal();
                     EditorGUILayout.LabelField("Painting with:", GUILayout.Width(100));
                     
-                    if (!string.IsNullOrEmpty(selectedBrushTerrain))
+                    if (!IsEmptyTerrain(selectedBrushTerrain))
                     {
                         // Draw color chip
                         if (terrainDatabase != null)
@@ -802,7 +966,7 @@ namespace DivineDragon.MapTools
                         {
                             foreach (string tid in selectedTerrain.m_Terrains)
                             {
-                                if (!string.IsNullOrEmpty(tid))
+                                if (!IsEmptyTerrain(tid))
                                 {
                                     usedTerrains.Add(tid);
                                 }
@@ -900,7 +1064,7 @@ namespace DivineDragon.MapTools
             // Current dimensions info
             EditorGUILayout.HelpBox(
                 $"Current Size: {selectedTerrain.m_Width} x {selectedTerrain.m_Height}\n" +
-                $"Total Tiles: {selectedTerrain.m_Terrains?.Length ?? 0}",
+                $"Total Tiles: {selectedTerrain.m_Width * selectedTerrain.m_Height}",
                 MessageType.None);
             
             EditorGUILayout.Space(5);
@@ -1170,9 +1334,13 @@ namespace DivineDragon.MapTools
         
         private static void OnSceneGUI(SceneView sceneView)
         {
-            if (!visualizationEnabled || selectedTerrain == null || selectedTerrain.m_Terrains == null)
+            if (!visualizationEnabled || selectedTerrain == null)
                 return;
-            
+
+            TerrainVirtualGrid currentGrid = GetVirtualGrid(selectedTerrain);
+            if (currentGrid == null)
+                return;
+
             int width = selectedTerrain.m_Width;
             int height = selectedTerrain.m_Height;
             float startX = selectedTerrain.m_X + worldOffset.x;
@@ -1236,19 +1404,13 @@ namespace DivineDragon.MapTools
                 {
                     for (int col = 0; col < width; col++)
                     {
-                        int index = row * width + col;
-                        
-                            if (index >= selectedTerrain.m_Terrains.Length)
-                                continue;
-                        
-                        string terrainId = selectedTerrain.m_Terrains[index];
-                        
-                        if (string.IsNullOrEmpty(terrainId))
+                        string terrainId = currentGrid.GetTerrainId(col, row);
+                        if (IsEmptyTerrain(terrainId))
                             continue;
-                        
+
                         float tileX = startX + col * TILE_SIZE;
                         float tileZ = startZ + row * TILE_SIZE;
-                        
+
                         Vector3[] verts = new Vector3[]
                         {
                             new Vector3(tileX, y, tileZ),
@@ -1256,15 +1418,15 @@ namespace DivineDragon.MapTools
                             new Vector3(tileX + TILE_SIZE, y, tileZ + TILE_SIZE),
                             new Vector3(tileX, y, tileZ + TILE_SIZE)
                         };
-                        
+
                         Color tileColor = terrainDatabase.GetTerrainColor(terrainId, Color.gray);
-                        
+
                         // Apply brightness adjustment
                         tileColor.r = Mathf.Clamp01(tileColor.r * colorBrightness);
                         tileColor.g = Mathf.Clamp01(tileColor.g * colorBrightness);
                         tileColor.b = Mathf.Clamp01(tileColor.b * colorBrightness);
                         tileColor.a = colorOpacity;
-                        
+
                         Handles.DrawSolidRectangleWithOutline(verts, tileColor, Color.clear);
                     }
                 }
@@ -1303,7 +1465,7 @@ namespace DivineDragon.MapTools
                 
                 foreach (var island in islands)
                 {
-                    if (string.IsNullOrEmpty(island.terrainId))
+                    if (IsEmptyTerrain(island.terrainId))
                         continue;
                     
                     // Get the base color for this terrain and darken it for the border
@@ -1325,12 +1487,11 @@ namespace DivineDragon.MapTools
             string highlightTerrainId = null;
             if (isMouseOverGrid && hoveredTile.x >= 0 && hoveredTile.y >= 0)
             {
-                int hoveredIndex = hoveredTile.y * width + hoveredTile.x;
-                if (hoveredIndex < selectedTerrain.m_Terrains.Length)
+                string hoveredTerrainIdForHighlight = currentGrid.GetTerrainId(hoveredTile.x, hoveredTile.y);
+                if (!IsEmptyTerrain(hoveredTerrainIdForHighlight))
                 {
-                    string hoveredTerrainIdForHighlight = selectedTerrain.m_Terrains[hoveredIndex];
                     bool isSampling = IsSamplingModifier(Event.current);
-                    if (paintMode && !isSampling && !string.IsNullOrEmpty(selectedBrushTerrain))
+                    if (paintMode && !isSampling && !IsEmptyTerrain(selectedBrushTerrain))
                     {
                         if (hoveredTerrainIdForHighlight == selectedBrushTerrain)
                         {
@@ -1358,14 +1519,14 @@ namespace DivineDragon.MapTools
                             highlightTerrainId = selectedBrushTerrain;
                         }
                     }
-                    else if (paintMode && isSampling && !string.IsNullOrEmpty(hoveredTerrainIdForHighlight))
+                    else if (paintMode && isSampling && !IsEmptyTerrain(hoveredTerrainIdForHighlight))
                     {
                         // While sampling in paint mode, highlight the hovered tile itself
                         // so it looks like the tile we'd paint with if picked.
                         currentHighlightRegion = new HashSet<Vector2Int> { hoveredTile };
                         highlightTerrainId = hoveredTerrainIdForHighlight;
                     }
-                    else if (!paintMode && !string.IsNullOrEmpty(hoveredTerrainIdForHighlight))
+                    else if (!paintMode && !IsEmptyTerrain(hoveredTerrainIdForHighlight))
                     {
                         currentHighlightRegion = GetHoverConnectedRegion(selectedTerrain, hoveredTile, width, height);
                         highlightTerrainId = hoveredTerrainIdForHighlight;
@@ -1387,14 +1548,10 @@ namespace DivineDragon.MapTools
             string hoveredTerrainId = "";
             if (isMouseOverGrid && hoveredTile.x >= 0 && hoveredTile.y >= 0)
             {
-                int hoveredIndex = hoveredTile.y * width + hoveredTile.x;
-                if (hoveredIndex < selectedTerrain.m_Terrains.Length)
+                hoveredTerrainId = currentGrid.GetTerrainId(hoveredTile.x, hoveredTile.y);
+                if (!IsEmptyTerrain(hoveredTerrainId))
                 {
-                    hoveredTerrainId = selectedTerrain.m_Terrains[hoveredIndex];
-                    if (!string.IsNullOrEmpty(hoveredTerrainId))
-                    {
-                        showHoverLabel = true;
-                    }
+                    showHoverLabel = true;
                 }
             }
             
@@ -1439,7 +1596,7 @@ namespace DivineDragon.MapTools
 
                     foreach (var island in islands)
                     {
-                        if (string.IsNullOrEmpty(island.terrainId))
+                        if (IsEmptyTerrain(island.terrainId))
                             continue;
                         if (showHoverLabel && island.tiles.Contains(hoveredTile))
                             continue;
@@ -1612,7 +1769,7 @@ namespace DivineDragon.MapTools
                     // Draw labels at relaxed positions, with sticky alpha-up smoothing
                     foreach (var island in islands)
                     {
-                        if (string.IsNullOrEmpty(island.terrainId)) continue;
+                        if (IsEmptyTerrain(island.terrainId)) continue;
                         if (showHoverLabel && island.tiles.Contains(hoveredTile)) continue;
 
                         foreach (var labelPos in island.labelPositions)
@@ -1870,7 +2027,9 @@ namespace DivineDragon.MapTools
 
         private static void PaintTerrainDedup(Vector2Int centerTile, int width, int height)
         {
-            if (string.IsNullOrEmpty(selectedBrushTerrain) || selectedTerrain == null) return;
+            if (IsEmptyTerrain(selectedBrushTerrain) || selectedTerrain == null) return;
+            TerrainVirtualGrid grid = GetVirtualGrid(selectedTerrain);
+            if (grid == null) return;
             var tiles = selectedTerrain.m_Terrains;
             if (tiles == null) return;
             
@@ -1893,13 +2052,24 @@ namespace DivineDragon.MapTools
                     int tileZ = centerTile.y + dz;
                     if (tileX >= 0 && tileX < width && tileZ >= 0 && tileZ < height)
                     {
-                        int index = tileZ * width + tileX;
-                        if (!paintedIndicesThisDrag.Contains(index) && index < tiles.Length)
+                        int actualIndex = grid.GetActualIndex(tileX, tileZ);
+                        if (actualIndex < 0 || actualIndex >= tiles.Length)
                         {
-                            tiles[index] = selectedBrushTerrain;
-                            paintedIndicesThisDrag.Add(index);
-                            modified = true;
+                            continue;
                         }
+
+                        if (!paintedIndicesThisDrag.Add(actualIndex))
+                        {
+                            continue;
+                        }
+
+                        if (IsEmptyTerrain(tiles[actualIndex]))
+                        {
+                            continue;
+                        }
+
+                        tiles[actualIndex] = selectedBrushTerrain;
+                        modified = true;
                     }
                 }
             }
@@ -1907,7 +2077,6 @@ namespace DivineDragon.MapTools
             {
                 selectedTerrain.m_Terrains = tiles;
                 MarkTerrainDirty(selectedTerrain);
-                if (islandCache.ContainsKey(selectedTerrain)) islandCache.Remove(selectedTerrain);
                 cachedHoverRegion = null;
                 SceneView.RepaintAll();
             }
@@ -1918,6 +2087,13 @@ namespace DivineDragon.MapTools
         {
             HashSet<Vector2Int> island = new HashSet<Vector2Int>();
             if (selectedTerrain == null || selectedTerrain.m_Terrains == null)
+                return island;
+
+            TerrainVirtualGrid grid = GetVirtualGrid(selectedTerrain);
+            if (grid == null)
+                return island;
+
+            if (IsEmptyTerrain(targetTerrain))
                 return island;
             
             // Get brush area
@@ -1952,9 +2128,8 @@ namespace DivineDragon.MapTools
                         neighbor.y >= 0 && neighbor.y < height &&
                         !visited.Contains(neighbor))
                     {
-                        int index = neighbor.y * width + neighbor.x;
-                        if (index < selectedTerrain.m_Terrains.Length &&
-                            selectedTerrain.m_Terrains[index] == targetTerrain)
+                        string tid = grid.GetTerrainId(neighbor.x, neighbor.y);
+                        if (!IsEmptyTerrain(tid) && tid == targetTerrain)
                         {
                             visited.Add(neighbor);
                             toCheck.Enqueue(neighbor);
@@ -1976,9 +2151,8 @@ namespace DivineDragon.MapTools
                         neighbor.y >= 0 && neighbor.y < height &&
                         !visited.Contains(neighbor))
                     {
-                        int index = neighbor.y * width + neighbor.x;
-                        if (index < selectedTerrain.m_Terrains.Length &&
-                            selectedTerrain.m_Terrains[index] == targetTerrain)
+                        string tid = grid.GetTerrainId(neighbor.x, neighbor.y);
+                        if (!IsEmptyTerrain(tid) && tid == targetTerrain)
                         {
                             visited.Add(neighbor);
                             toCheck.Enqueue(neighbor);
@@ -2015,29 +2189,33 @@ namespace DivineDragon.MapTools
                 Color sampleOutline = Color.gray;
                 if (selectedTerrain != null && terrainDatabase != null)
                 {
-                    int index = centerTile.y * width + centerTile.x;
-                    if (index >= 0 && index < selectedTerrain.m_Terrains.Length)
+                    TerrainVirtualGrid grid = GetVirtualGrid(selectedTerrain);
+                    if (grid != null)
                     {
-                        string terrainToSample = selectedTerrain.m_Terrains[index];
-                        if (!string.IsNullOrEmpty(terrainToSample))
+                        int actualIndex = grid.GetActualIndex(centerTile.x, centerTile.y);
+                        if (actualIndex >= 0 && actualIndex < selectedTerrain.m_Terrains.Length)
                         {
-                            // Get base color from database
-                            Color terrainColor = terrainDatabase.GetTerrainColor(terrainToSample, Color.gray);
-                            
-                            // Apply brightness adjustment (same as actual tile rendering)
-                            terrainColor.r = Mathf.Clamp01(terrainColor.r * colorBrightness);
-                            terrainColor.g = Mathf.Clamp01(terrainColor.g * colorBrightness);
-                            terrainColor.b = Mathf.Clamp01(terrainColor.b * colorBrightness);
-                            
-                            // Now create preview colors
-                            sampleColor = new Color(terrainColor.r, terrainColor.g, terrainColor.b, 0.4f);
-                            // Darken the adjusted color for the outline
-                            sampleOutline = new Color(
-                                terrainColor.r * 0.6f,
-                                terrainColor.g * 0.6f,
-                                terrainColor.b * 0.6f,
-                                0.8f
-                            );
+                            string terrainToSample = selectedTerrain.m_Terrains[actualIndex];
+                            if (!IsEmptyTerrain(terrainToSample))
+                            {
+                                // Get base color from database
+                                Color terrainColor = terrainDatabase.GetTerrainColor(terrainToSample, Color.gray);
+
+                                // Apply brightness adjustment (same as actual tile rendering)
+                                terrainColor.r = Mathf.Clamp01(terrainColor.r * colorBrightness);
+                                terrainColor.g = Mathf.Clamp01(terrainColor.g * colorBrightness);
+                                terrainColor.b = Mathf.Clamp01(terrainColor.b * colorBrightness);
+
+                                // Now create preview colors
+                                sampleColor = new Color(terrainColor.r, terrainColor.g, terrainColor.b, 0.4f);
+                                // Darken the adjusted color for the outline
+                                sampleOutline = new Color(
+                                    terrainColor.r * 0.6f,
+                                    terrainColor.g * 0.6f,
+                                    terrainColor.b * 0.6f,
+                                    0.8f
+                                );
+                            }
                         }
                     }
                 }
@@ -2077,7 +2255,7 @@ namespace DivineDragon.MapTools
             else
             {
                 // Paint preview with actual terrain color
-                if (string.IsNullOrEmpty(selectedBrushTerrain) || terrainDatabase == null)
+                if (IsEmptyTerrain(selectedBrushTerrain) || terrainDatabase == null)
                 {
                     // Fallback to yellow if no terrain selected
                     Color previewColor = new Color(1f, 1f, 0f, 0.3f);
@@ -2116,6 +2294,7 @@ namespace DivineDragon.MapTools
         private static void DrawBrushTiles(Vector2Int centerTile, int width, int height, float startX, float startZ, float y, Color fillColor, Color outlineColor)
         {
             int halfSize = (brushSize - 1) / 2;
+            TerrainVirtualGrid grid = GetVirtualGrid(selectedTerrain);
             
             for (int dx = -halfSize; dx <= halfSize; dx++)
             {
@@ -2126,6 +2305,21 @@ namespace DivineDragon.MapTools
                     
                     if (tileX >= 0 && tileX < width && tileZ >= 0 && tileZ < height)
                     {
+                        if (grid != null)
+                        {
+                            int actualIndex = grid.GetActualIndex(tileX, tileZ);
+                            if (actualIndex < 0 || actualIndex >= (selectedTerrain.m_Terrains?.Length ?? 0))
+                            {
+                                continue;
+                            }
+
+                            string tid = selectedTerrain.m_Terrains[actualIndex];
+                            if (IsEmptyTerrain(tid))
+                            {
+                                continue;
+                            }
+                        }
+
                         float worldX = startX + tileX * TILE_SIZE;
                         float worldZ = startZ + tileZ * TILE_SIZE;
                         
@@ -2148,6 +2342,7 @@ namespace DivineDragon.MapTools
             // Collect all tiles that would be painted
             HashSet<Vector2Int> paintedTiles = new HashSet<Vector2Int>();
             int halfSize = (brushSize - 1) / 2;
+            TerrainVirtualGrid grid = GetVirtualGrid(selectedTerrain);
             
             for (int dx = -halfSize; dx <= halfSize; dx++)
             {
@@ -2155,9 +2350,24 @@ namespace DivineDragon.MapTools
                 {
                     int tileX = centerTile.x + dx;
                     int tileZ = centerTile.y + dz;
-                    
+
                     if (tileX >= 0 && tileX < width && tileZ >= 0 && tileZ < height)
                     {
+                        if (grid != null)
+                        {
+                            int actualIndex = grid.GetActualIndex(tileX, tileZ);
+                            if (actualIndex < 0 || actualIndex >= (selectedTerrain.m_Terrains?.Length ?? 0))
+                            {
+                                continue;
+                            }
+
+                            string tid = selectedTerrain.m_Terrains[actualIndex];
+                            if (IsEmptyTerrain(tid))
+                            {
+                                continue;
+                            }
+                        }
+
                         paintedTiles.Add(new Vector2Int(tileX, tileZ));
                     }
                 }
@@ -2212,15 +2422,23 @@ namespace DivineDragon.MapTools
             if (selectedTerrain == null)
                 return;
             
-            int index = tile.y * width + tile.x;
-            if (index < selectedTerrain.m_Terrains.Length)
+            TerrainVirtualGrid grid = GetVirtualGrid(selectedTerrain);
+            if (grid == null)
+                return;
+
+            int actualIndex = grid.GetActualIndex(tile.x, tile.y);
+            if (actualIndex >= 0 && actualIndex < selectedTerrain.m_Terrains.Length)
             {
-                selectedBrushTerrain = selectedTerrain.m_Terrains[index];
-                
-                // Force UI refresh to show the newly selected terrain
-                if (instance != null)
+                string sampledTid = selectedTerrain.m_Terrains[actualIndex];
+                if (!IsEmptyTerrain(sampledTid))
                 {
-                    instance.Repaint();
+                    selectedBrushTerrain = sampledTid;
+
+                    // Force UI refresh to show the newly selected terrain
+                    if (instance != null)
+                    {
+                        instance.Repaint();
+                    }
                 }
             }
         }
@@ -2229,13 +2447,13 @@ namespace DivineDragon.MapTools
         private static HashSet<Vector2Int> FindConnectedRegion(TerrainAssetAdapter terrain, Vector2Int startTile, int width, int height)
         {
             HashSet<Vector2Int> region = new HashSet<Vector2Int>();
-            int startIndex = startTile.y * width + startTile.x;
-            
-            if (startIndex >= terrain.m_Terrains.Length)
+
+            TerrainVirtualGrid grid = GetVirtualGrid(terrain);
+            if (grid == null)
                 return region;
-                
-            string targetTerrain = terrain.m_Terrains[startIndex];
-            if (string.IsNullOrEmpty(targetTerrain))
+
+            string targetTerrain = grid.GetTerrainId(startTile.x, startTile.y);
+            if (IsEmptyTerrain(targetTerrain))
                 return region;
             
             Queue<Vector2Int> toVisit = new Queue<Vector2Int>();
@@ -2257,9 +2475,8 @@ namespace DivineDragon.MapTools
                         neighbor.y >= 0 && neighbor.y < height &&
                         !visited.Contains(neighbor))
                     {
-                        int neighborIndex = neighbor.y * width + neighbor.x;
-                        if (neighborIndex < terrain.m_Terrains.Length &&
-                            terrain.m_Terrains[neighborIndex] == targetTerrain)
+                        string neighborTerrain = grid.GetTerrainId(neighbor.x, neighbor.y);
+                        if (!IsEmptyTerrain(neighborTerrain) && neighborTerrain == targetTerrain)
                         {
                             visited.Add(neighbor);
                             toVisit.Enqueue(neighbor);
@@ -2690,6 +2907,12 @@ namespace DivineDragon.MapTools
             int height = terrain.m_Height;
             bool[,] visited = new bool[width, height];
             List<TerrainIsland> islands = new List<TerrainIsland>();
+
+            TerrainVirtualGrid grid = GetVirtualGrid(terrain);
+            if (grid == null)
+            {
+                return islands;
+            }
             
             for (int y = 0; y < height; y++)
             {
@@ -2697,12 +2920,8 @@ namespace DivineDragon.MapTools
                 {
                     if (!visited[x, y])
                     {
-                        int index = y * width + x;
-                        if (index >= terrain.m_Terrains.Length)
-                            continue;
-                        
-                        string terrainId = terrain.m_Terrains[index];
-                        if (string.IsNullOrEmpty(terrainId))
+                        string terrainId = grid.GetTerrainId(x, y);
+                        if (IsEmptyTerrain(terrainId))
                         {
                             visited[x, y] = true;
                             continue;
@@ -2728,17 +2947,13 @@ namespace DivineDragon.MapTools
                                 // Check bounds
                                 if (nx >= 0 && nx < width && ny >= 0 && ny < height && !visited[nx, ny])
                                 {
-                                    int neighborIndex = ny * width + nx;
-                                    if (neighborIndex < terrain.m_Terrains.Length)
+                                    string neighborTerrain = grid.GetTerrainId(nx, ny);
+
+                                    // If same terrain type, add to queue
+                                    if (!IsEmptyTerrain(neighborTerrain) && neighborTerrain == terrainId)
                                     {
-                                        string neighborTerrain = terrain.m_Terrains[neighborIndex];
-                                        
-                                        // If same terrain type, add to queue
-                                        if (neighborTerrain == terrainId)
-                                        {
-                                            visited[nx, ny] = true;
-                                            queue.Enqueue(new Vector2Int(nx, ny));
-                                        }
+                                        visited[nx, ny] = true;
+                                        queue.Enqueue(new Vector2Int(nx, ny));
                                     }
                                 }
                             }
@@ -2755,6 +2970,11 @@ namespace DivineDragon.MapTools
         
         private static string GetTerrainDisplayText(string terrainId)
         {
+            if (IsEmptyTerrain(terrainId))
+            {
+                return string.Empty;
+            }
+
             string tid = terrainId.Replace("TID_", "");
             string name = null;
             
@@ -3431,7 +3651,7 @@ namespace DivineDragon.MapTools
                     if (index >= selectedTerrain.m_Terrains.Length) continue;
                     
                     string terrainId = selectedTerrain.m_Terrains[index];
-                    if (string.IsNullOrEmpty(terrainId) || terrainId == "MTID_Nothing") continue;
+                    if (IsEmptyTerrain(terrainId) || terrainId == "MTID_Nothing") continue;
                     
                     float tileX = startX + col * TILE_SIZE;
                     float tileZ = startZ + row * TILE_SIZE;
@@ -3458,7 +3678,7 @@ namespace DivineDragon.MapTools
                     if (index >= previewTerrains.Length) continue;
                     
                     string terrainId = previewTerrains[index];
-                    if (string.IsNullOrEmpty(terrainId) || terrainId == "MTID_Nothing") continue;
+                    if (IsEmptyTerrain(terrainId) || terrainId == "MTID_Nothing") continue;
                     
                     float tileX = startX + col * TILE_SIZE;
                     float tileZ = startZ + row * TILE_SIZE;
