@@ -161,7 +161,7 @@ namespace DivineDragon.MapTools
         public bool seenThisFrame;
     }
     
-    public class TerrainPaintToolWindow : EditorWindow
+    public partial class TerrainPaintToolWindow : EditorWindow
     {
         private static TerrainPaintToolWindow instance;
         // External tools (e.g., Dispos tool) can lock painting while keeping visualization
@@ -199,112 +199,6 @@ namespace DivineDragon.MapTools
         private static float relaxPriorityLarge = 1.6f;
         private static float relaxViewportPad = 8f;
 
-        private static readonly HashSet<string> EmptyTerrainIds = new HashSet<string>(StringComparer.Ordinal)
-        {
-            "TID_無し"
-        };
-
-        private class TerrainVirtualGrid
-        {
-            public TerrainAssetAdapter Adapter { get; }
-            public int Width { get; }
-            public int Height { get; }
-
-            private readonly int[] actualIndices;
-            private readonly string[] terrainIds;
-
-            public TerrainVirtualGrid(TerrainAssetAdapter adapter)
-            {
-                Adapter = adapter;
-                Width = adapter.Width;
-                Height = adapter.Height;
-
-                int expectedCount = Mathf.Max(0, Width * Height);
-                actualIndices = new int[expectedCount];
-                terrainIds = new string[expectedCount];
-                for (int i = 0; i < expectedCount; i++)
-                {
-                    actualIndices[i] = -1;
-                    terrainIds[i] = string.Empty;
-                }
-
-                var raw = adapter.m_Terrains ?? Array.Empty<string>();
-                int fill = 0;
-                bool overflow = false;
-                for (int rawIndex = 0; rawIndex < raw.Length; rawIndex++)
-                {
-                    string tid = raw[rawIndex];
-                    if (IsEmptyTerrain(tid))
-                    {
-                        continue;
-                    }
-
-                    if (fill < expectedCount)
-                    {
-                        actualIndices[fill] = rawIndex;
-                        terrainIds[fill] = tid;
-                        fill++;
-                    }
-                    else
-                    {
-                        overflow = true;
-                        break;
-                    }
-                }
-
-                string assetKey = adapter.Asset != null ? AssetDatabase.GetAssetPath(adapter.Asset) : adapter.Name;
-
-                if (fill < expectedCount)
-                {
-                    if (s_LoggedInsufficientTiles.Add(assetKey))
-                    {
-                        Debug.LogWarning($"Terrain '{adapter.Name}' only provided {fill} non-empty tiles but expected {expectedCount}. Remaining slots will be empty.");
-                    }
-                }
-                else if (overflow)
-                {
-                    if (s_LoggedOverflowTiles.Add(assetKey))
-                    {
-                        Debug.LogWarning($"Terrain '{adapter.Name}' has more non-empty tiles than expected ({expectedCount}). Extra tiles will be ignored in the virtual view.");
-                    }
-                }
-            }
-
-            public string GetTerrainId(int x, int y)
-            {
-                int virtualIndex = GetVirtualIndex(x, y);
-                if (virtualIndex < 0)
-                {
-                    return string.Empty;
-                }
-                return terrainIds[virtualIndex];
-            }
-
-            public int GetActualIndex(int x, int y)
-            {
-                int virtualIndex = GetVirtualIndex(x, y);
-                if (virtualIndex < 0)
-                {
-                    return -1;
-                }
-                return actualIndices[virtualIndex];
-            }
-
-            private int GetVirtualIndex(int x, int y)
-            {
-                if (x < 0 || y < 0 || x >= Width || y >= Height)
-                {
-                    return -1;
-                }
-                return y * Width + x;
-            }
-        }
-
-        private static readonly Dictionary<TerrainAssetAdapter, TerrainVirtualGrid> s_VirtualGrids =
-            new Dictionary<TerrainAssetAdapter, TerrainVirtualGrid>();
-        private static readonly HashSet<string> s_LoggedInsufficientTiles = new HashSet<string>();
-        private static readonly HashSet<string> s_LoggedOverflowTiles = new HashSet<string>();
-        
         // Camera movement detection
         private static Vector3 lastCameraPosition;
         private static Quaternion lastCameraRotation;
@@ -364,54 +258,6 @@ namespace DivineDragon.MapTools
         private const float LABEL_ICON_SIZE = 8f;
         private const float LABEL_ICON_PADDING = 3f;
         
-        // Advanced tab variables for resize
-        private static int newTerrainWidth = 50;
-        private static int newTerrainHeight = 50;
-        
-        // For shrinking, use enums to track which side to remove from
-        private enum ShrinkDirection
-        {
-            Left,
-            Right,
-            Center
-        }
-        private static ShrinkDirection shrinkHorizontal = ShrinkDirection.Right;
-        private static int shiftAmount = 1;
-        
-        private enum ShrinkDirectionVertical
-        {
-            Top,
-            Bottom,
-            Center
-        }
-        private static ShrinkDirectionVertical shrinkVertical = ShrinkDirectionVertical.Bottom;
-        
-        // Advanced operation preview modes
-        private enum MirrorMode
-        {
-            None,
-            Horizontal,
-            Vertical
-        }
-        private static MirrorMode mirrorPreviewMode = MirrorMode.None;
-        
-        private enum ShiftDirection
-        {
-            None,
-            Left,
-            Right,
-            Up,
-            Down
-        }
-        private static ShiftDirection shiftPreviewMode = ShiftDirection.None;
-        private static string[] previewTerrains = null;
-        
-        // PNG Export variables
-        private static int exportPixelsPerTile = 20;
-        private static bool exportIncludeGrid = true;
-        private static Color exportGridColor = new Color(0.3f, 0.3f, 0.3f, 1f);
-        private static int exportGridThickness = 1;
-        private static string exportPath = "";
         
         [MenuItem("Window/Terrain Paint Tool")]
         public static void ShowWindow()
@@ -446,9 +292,7 @@ namespace DivineDragon.MapTools
             lastCachedTerrain = null;
             cachedHoverRegion = null;
             s_LabelNodes.Clear();
-            s_VirtualGrids.Clear();
-            s_LoggedInsufficientTiles.Clear();
-            s_LoggedOverflowTiles.Clear();
+            TerrainVirtualGridCache.ClearAll();
             SceneView.RepaintAll();
             if (instance != null)
             {
@@ -524,39 +368,11 @@ namespace DivineDragon.MapTools
             return e != null && (e.control || e.command);
         }
 
-        private static bool IsEmptyTerrain(string terrainId)
-        {
-            if (string.IsNullOrEmpty(terrainId))
-            {
-                return true;
-            }
+        private static bool IsEmptyTerrain(string terrainId) => TerrainVirtualGridCache.IsEmptyTerrain(terrainId);
 
-            return EmptyTerrainIds.Contains(terrainId);
-        }
+        private static TerrainVirtualGrid GetVirtualGrid(TerrainAssetAdapter terrain) => TerrainVirtualGridCache.GetGrid(terrain);
 
-        private static TerrainVirtualGrid GetVirtualGrid(TerrainAssetAdapter terrain)
-        {
-            if (terrain == null)
-            {
-                return null;
-            }
-
-            if (!s_VirtualGrids.TryGetValue(terrain, out TerrainVirtualGrid grid))
-            {
-                grid = new TerrainVirtualGrid(terrain);
-                s_VirtualGrids[terrain] = grid;
-            }
-
-            return grid;
-        }
-
-        private static void InvalidateVirtualGrid(TerrainAssetAdapter terrain)
-        {
-            if (terrain != null)
-            {
-                s_VirtualGrids.Remove(terrain);
-            }
-        }
+        private static void InvalidateVirtualGrid(TerrainAssetAdapter terrain) => TerrainVirtualGridCache.Invalidate(terrain);
 
         private static void RecordTerrainUndo(TerrainAssetAdapter terrain, string label)
         {
@@ -582,10 +398,6 @@ namespace DivineDragon.MapTools
                     cachedRegionTerrain = null;
                     cachedHoverRegion = null;
                 }
-
-                string assetKey = terrain.Asset != null ? AssetDatabase.GetAssetPath(terrain.Asset) : terrain.Name;
-                s_LoggedInsufficientTiles.Remove(assetKey);
-                s_LoggedOverflowTiles.Remove(assetKey);
             }
         }
 
@@ -1054,280 +866,7 @@ namespace DivineDragon.MapTools
             
             EditorGUILayout.EndScrollView();
         }
-        
-        private void DrawAdvancedTab()
-        {
-            // Terrain Resize Section
-            EditorGUILayout.Space(10);
-            EditorGUILayout.LabelField("Terrain Resize", EditorStyles.boldLabel);
-            
-            // Initialize values from current terrain if they haven't been set
-            if (newTerrainWidth == 50 || newTerrainHeight == 50) // Default values
-            {
-                newTerrainWidth = selectedTerrain.m_Width;
-                newTerrainHeight = selectedTerrain.m_Height;
-            }
-            
-            // Current dimensions info
-            EditorGUILayout.HelpBox(
-                $"Current Size: {selectedTerrain.m_Width} x {selectedTerrain.m_Height}\n" +
-                $"Total Tiles: {selectedTerrain.m_Width * selectedTerrain.m_Height}",
-                MessageType.None);
-            
-            EditorGUILayout.Space(5);
-            
-            // New dimensions
-            EditorGUILayout.LabelField("New Dimensions", EditorStyles.miniBoldLabel);
-            EditorGUI.BeginChangeCheck();
-            newTerrainWidth = EditorGUILayout.IntField("New Width", Mathf.Max(1, newTerrainWidth));
-            newTerrainHeight = EditorGUILayout.IntField("New Height", Mathf.Max(1, newTerrainHeight));
-            bool resizeChanged = EditorGUI.EndChangeCheck();
-            
-            // Calculate size change
-            int widthChange = newTerrainWidth - selectedTerrain.m_Width;
-            int heightChange = newTerrainHeight - selectedTerrain.m_Height;
-            
-            if (widthChange != 0 || heightChange != 0)
-            {
-                EditorGUILayout.Space(5);
-                
-                // Width changes - only expand right
-                if (widthChange > 0)
-                {
-                    EditorGUILayout.HelpBox($"Will add {widthChange} columns to the right", MessageType.Info);
-                }
-                else if (widthChange < 0)
-                {
-                    EditorGUILayout.HelpBox($"Shrinking by {-widthChange} columns will permanently lose tile data!", MessageType.Warning);
-                    EditorGUI.BeginChangeCheck();
-                    shrinkHorizontal = (ShrinkDirection)EditorGUILayout.EnumPopup("Remove from", shrinkHorizontal);
-                    if (EditorGUI.EndChangeCheck())
-                    {
-                        SceneView.RepaintAll();
-                    }
-                }
-                
-                // Height changes - only expand bottom
-                if (heightChange > 0)
-                {
-                    EditorGUILayout.HelpBox($"Will add {heightChange} rows to the bottom", MessageType.Info);
-                }
-                else if (heightChange < 0)
-                {
-                    EditorGUILayout.HelpBox($"Shrinking by {-heightChange} rows will permanently lose tile data!", MessageType.Warning);
-                    EditorGUI.BeginChangeCheck();
-                    shrinkVertical = (ShrinkDirectionVertical)EditorGUILayout.EnumPopup("Remove from", shrinkVertical);
-                    if (EditorGUI.EndChangeCheck())
-                    {
-                        SceneView.RepaintAll();
-                    }
-                }
-                
-                EditorGUILayout.Space(5);
-                
-                // Always generate preview when dimensions change
-                if (resizeChanged)
-                {
-                    SceneView.RepaintAll();
-                }
-                
-                EditorGUILayout.Space(10);
-                
-                if (GUILayout.Button("Apply Resize", GUILayout.Height(30)))
-                {
-                    bool proceed = true;
-                    
-                    // Warn if shrinking
-                    if (widthChange < 0 || heightChange < 0)
-                    {
-                        proceed = EditorUtility.DisplayDialog(
-                            "Terrain Resize Warning",
-                            "Shrinking the terrain will permanently lose tile data that cannot be recovered by re-expanding.\n\n" +
-                            "This action can be undone with Ctrl+Z.\n\n" +
-                            "Continue?",
-                            "Yes, Resize",
-                            "Cancel"
-                        );
-                    }
-                    
-                    if (proceed)
-                    {
-                        ResizeTerrain();
-                        previewTerrains = null;
-                    }
-                }
-            }
-            else
-            {
-                EditorGUILayout.HelpBox("Adjust width or height to enable resize options.", MessageType.Info);
-                previewTerrains = null;
-            }
-            
-            EditorGUILayout.Space(20);
-            
-            // Mirror/Flip Tools
-            EditorGUILayout.LabelField("Mirror/Flip Tools", EditorStyles.boldLabel);
-            
-            EditorGUI.BeginChangeCheck();
-            mirrorPreviewMode = (MirrorMode)EditorGUILayout.EnumPopup("Mirror Mode", mirrorPreviewMode);
-            if (EditorGUI.EndChangeCheck())
-            {
-                if (mirrorPreviewMode != MirrorMode.None)
-                {
-                    GenerateMirrorPreview();
-                }
-                else
-                {
-                    previewTerrains = null;
-                }
-                SceneView.RepaintAll();
-            }
-            
-            if (mirrorPreviewMode != MirrorMode.None)
-            {
-                EditorGUILayout.HelpBox("Preview is shown in Scene view. Green = current, Blue = preview", MessageType.Info);
-                
-                if (GUILayout.Button($"Apply {mirrorPreviewMode} Mirror", GUILayout.Height(25)))
-                {
-                    if (mirrorPreviewMode == MirrorMode.Horizontal)
-                    {
-                        MirrorTerrainHorizontal();
-                    }
-                    else if (mirrorPreviewMode == MirrorMode.Vertical)
-                    {
-                        MirrorTerrainVertical();
-                    }
-                    mirrorPreviewMode = MirrorMode.None;
-                    previewTerrains = null;
-                    SceneView.RepaintAll();
-                }
-                
-                if (GUILayout.Button("Cancel", GUILayout.Height(20)))
-                {
-                    mirrorPreviewMode = MirrorMode.None;
-                    previewTerrains = null;
-                    SceneView.RepaintAll();
-                }
-            }
-            
-            // Shift Operations
-            EditorGUILayout.Space(20);
-            EditorGUILayout.LabelField("Shift Operations", EditorStyles.boldLabel);
-            
-            EditorGUILayout.BeginHorizontal();
-            EditorGUILayout.LabelField("Shift Amount:", GUILayout.Width(80));
-            EditorGUI.BeginChangeCheck();
-            shiftAmount = EditorGUILayout.IntSlider(shiftAmount, 1, Mathf.Max(selectedTerrain.m_Width, selectedTerrain.m_Height));
-            bool shiftAmountChanged = EditorGUI.EndChangeCheck();
-            EditorGUILayout.EndHorizontal();
-            
-            EditorGUI.BeginChangeCheck();
-            shiftPreviewMode = (ShiftDirection)EditorGUILayout.EnumPopup("Shift Direction", shiftPreviewMode);
-            bool shiftModeChanged = EditorGUI.EndChangeCheck();
-            
-            if ((shiftModeChanged || shiftAmountChanged) && shiftPreviewMode != ShiftDirection.None)
-            {
-                GenerateShiftPreview();
-                SceneView.RepaintAll();
-            }
-            
-            if (shiftPreviewMode != ShiftDirection.None)
-            {
-                EditorGUILayout.HelpBox("Preview is shown in Scene view. Green = current, Blue = preview\nData shifted out of bounds will be replaced with MTID_Nothing", MessageType.Info);
-                
-                if (GUILayout.Button($"Apply Shift {shiftPreviewMode}", GUILayout.Height(25)))
-                {
-                    switch (shiftPreviewMode)
-                    {
-                        case ShiftDirection.Left:
-                            ShiftTerrainHorizontal(-shiftAmount);
-                            break;
-                        case ShiftDirection.Right:
-                            ShiftTerrainHorizontal(shiftAmount);
-                            break;
-                        case ShiftDirection.Up:
-                            ShiftTerrainVertical(-shiftAmount);
-                            break;
-                        case ShiftDirection.Down:
-                            ShiftTerrainVertical(shiftAmount);
-                            break;
-                    }
-                    shiftPreviewMode = ShiftDirection.None;
-                    previewTerrains = null;
-                    SceneView.RepaintAll();
-                }
-                
-                if (GUILayout.Button("Cancel", GUILayout.Height(20)))
-                {
-                    shiftPreviewMode = ShiftDirection.None;
-                    previewTerrains = null;
-                    SceneView.RepaintAll();
-                }
-            }
-            
-            // PNG Export Section
-            EditorGUILayout.Space(20);
-            EditorGUILayout.LabelField("Export to PNG", EditorStyles.boldLabel);
-            EditorGUILayout.HelpBox("Export the terrain visualization as a PNG image file.", MessageType.Info);
-            
-            EditorGUILayout.Space(5);
-            
-            // Pixels per tile
-            EditorGUILayout.LabelField("Image Settings", EditorStyles.miniBoldLabel);
-            exportPixelsPerTile = EditorGUILayout.IntSlider("Pixels Per Tile", exportPixelsPerTile, 5, 100);
-            
-            // Calculate and show output size
-            int outputWidth = selectedTerrain.m_Width * exportPixelsPerTile;
-            int outputHeight = selectedTerrain.m_Height * exportPixelsPerTile;
-            if (exportIncludeGrid)
-            {
-                outputWidth += (selectedTerrain.m_Width + 1) * exportGridThickness;
-                outputHeight += (selectedTerrain.m_Height + 1) * exportGridThickness;
-            }
-            EditorGUILayout.LabelField($"Output Size: {outputWidth} x {outputHeight} pixels", EditorStyles.miniLabel);
-            
-            EditorGUILayout.Space(5);
-            
-            // Grid options
-            EditorGUILayout.LabelField("Grid Options", EditorStyles.miniBoldLabel);
-            exportIncludeGrid = EditorGUILayout.Toggle("Include Grid", exportIncludeGrid);
-            
-            if (exportIncludeGrid)
-            {
-                EditorGUI.indentLevel++;
-                exportGridColor = EditorGUILayout.ColorField("Grid Color", exportGridColor);
-                exportGridThickness = EditorGUILayout.IntSlider("Grid Thickness", exportGridThickness, 1, 5);
-                EditorGUI.indentLevel--;
-            }
-            
-            EditorGUILayout.Space(5);
-            
-            // Export button
-            if (GUILayout.Button("Export to PNG...", GUILayout.Height(30)))
-            {
-                // Open save file dialog
-                string defaultPath = TerrainPNGExporter.GetDefaultExportPath(selectedTerrain);
-                string path = EditorUtility.SaveFilePanel(
-                    "Export Terrain as PNG",
-                    System.IO.Path.GetDirectoryName(defaultPath),
-                    System.IO.Path.GetFileName(defaultPath),
-                    "png");
-                
-                if (!string.IsNullOrEmpty(path))
-                {
-                    TerrainPNGExporter.ExportToPNG(
-                        selectedTerrain,
-                        terrainDatabase,
-                        exportPixelsPerTile,
-                        exportIncludeGrid,
-                        exportGridColor,
-                        exportGridThickness,
-                        colorBrightness,
-                        path);
-                }
-            }
-        }
-        
+
         private static float GetCameraDistance(SceneView sceneView, float terrainCenterX, float terrainCenterZ, float terrainY)
         {
             if (sceneView == null || sceneView.camera == null)
@@ -1338,7 +877,6 @@ namespace DivineDragon.MapTools
             return Vector3.Distance(cameraPos, terrainCenter);
         }
 
-        
         private static void OnSceneGUI(SceneView sceneView)
         {
             if (!visualizationEnabled || selectedTerrain == null)
@@ -1354,25 +892,20 @@ namespace DivineDragon.MapTools
             float startZ = selectedTerrain.m_Z + worldOffset.z;
             float y = worldOffset.y;
             
-            // Calculate camera distance for zoom-aware rendering
             float terrainCenterX = startX + (width * TILE_SIZE) / 2f;
             float terrainCenterZ = startZ + (height * TILE_SIZE) / 2f;
             float cameraDistance = GetCameraDistance(sceneView, terrainCenterX, terrainCenterZ, y);
             
-            // Calculate frame delta time for smooth interpolation
             float currentTime = (float)EditorApplication.timeSinceStartup;
-            float deltaTime = Mathf.Min(currentTime - lastFrameTime, 0.1f); // Cap at 100ms
+            float deltaTime = Mathf.Min(currentTime - lastFrameTime, 0.1f);
             lastFrameTime = currentTime;
             
-            // Detect camera movement
-            // Track camera movement and stillness
             if (sceneView.camera != null)
             {
                 Vector3 currentCamPos = sceneView.camera.transform.position;
                 Quaternion currentCamRot = sceneView.camera.transform.rotation;
                 float currentFOV = sceneView.camera.fieldOfView;
                 
-                // Check if camera has moved
                 if (Vector3.Distance(currentCamPos, lastCameraPosition) > 0.01f ||
                     Quaternion.Angle(currentCamRot, lastCameraRotation) > 0.1f ||
                     Mathf.Abs(currentFOV - lastCameraFOV) > 0.1f)
@@ -1382,7 +915,6 @@ namespace DivineDragon.MapTools
                 }
                 else
                 {
-                    // Camera hasn't moved this frame
                     cameraStillTime += deltaTime;
                     if (cameraStillTime > cameraStillThreshold)
                     {
@@ -1395,16 +927,13 @@ namespace DivineDragon.MapTools
                 lastCameraFOV = currentFOV;
             }
             
-            // Handle mouse input for hover detection and painting
             HandleMouseInput(width, height, startX, startZ, y);
             
             bool isRepaint = Event.current.type == EventType.Repaint;
 
-            // Track movement transitions for label layout behavior
             justStartedMoving = (!wasCameraMoving && cameraIsMoving);
             wasCameraMoving = cameraIsMoving;
 
-            // Draw colored tiles if in color mode
             if (isRepaint && terrainDatabase != null)
             {
                 for (int row = 0; row < height; row++)
@@ -1427,8 +956,6 @@ namespace DivineDragon.MapTools
                         };
 
                         Color tileColor = terrainDatabase.GetTerrainColor(terrainId, Color.gray);
-
-                        // Apply brightness adjustment
                         tileColor.r = Mathf.Clamp01(tileColor.r * colorBrightness);
                         tileColor.g = Mathf.Clamp01(tileColor.g * colorBrightness);
                         tileColor.b = Mathf.Clamp01(tileColor.b * colorBrightness);
@@ -1439,57 +966,36 @@ namespace DivineDragon.MapTools
                 }
             }
             
-            // Draw grid lines with solid rendering
             if (isRepaint && showGridLines)
             {
                 Handles.color = gridColor;
-                
-                // Draw horizontal lines using DrawLine for solid appearance
                 for (int row = 0; row <= height; row++)
                 {
                     Vector3 start = new Vector3(startX, y + 0.01f, startZ + row * TILE_SIZE);
                     Vector3 end = new Vector3(startX + width * TILE_SIZE, y + 0.01f, startZ + row * TILE_SIZE);
-                    
-                    // DrawLine uses solid lines without anti-aliasing
                     Handles.DrawLine(start, end, gridThickness);
                 }
-                
-                // Draw vertical lines
                 for (int col = 0; col <= width; col++)
                 {
                     Vector3 start = new Vector3(startX + col * TILE_SIZE, y + 0.01f, startZ);
                     Vector3 end = new Vector3(startX + col * TILE_SIZE, y + 0.01f, startZ + height * TILE_SIZE);
-                    
                     Handles.DrawLine(start, end, gridThickness);
                 }
             }
             
-            // Draw island borders (grouping is always islands)
             if (isRepaint && terrainDatabase != null)
             {
-                // Get cached islands or create new ones
                 List<TerrainIsland> islands = GetOrCreateIslands(selectedTerrain, cameraDistance);
-                
                 foreach (var island in islands)
                 {
                     if (IsEmptyTerrain(island.terrainId))
                         continue;
-                    
-                    // Get the base color for this terrain and darken it for the border
                     Color baseColor = terrainDatabase.GetTerrainColor(island.terrainId, Color.gray);
-                    Color borderColor = new Color(
-                        baseColor.r * 0.6f,
-                        baseColor.g * 0.6f,
-                        baseColor.b * 0.6f,
-                        1f
-                    );
-                    
-                    // Draw borders around the island
+                    Color borderColor = new Color(baseColor.r * 0.6f, baseColor.g * 0.6f, baseColor.b * 0.6f, 1f);
                     DrawIslandBorders(island, width, height, startX, startZ, y, borderColor);
                 }
             }
             
-            // Compute current highlight region (normal and paint modes) and draw immediately (no fade).
             HashSet<Vector2Int> currentHighlightRegion = null;
             string highlightTerrainId = null;
             if (isMouseOverGrid && hoveredTile.x >= 0 && hoveredTile.y >= 0)
@@ -1502,13 +1008,11 @@ namespace DivineDragon.MapTools
                     {
                         if (hoveredTerrainIdForHighlight == selectedBrushTerrain)
                         {
-                            // Highlight current island (already selected terrain)
                             currentHighlightRegion = GetHoverConnectedRegion(selectedTerrain, hoveredTile, width, height);
                             highlightTerrainId = selectedBrushTerrain;
                         }
                         else
                         {
-                            // Highlight adjacent same-brush islands but exclude brush area
                             var adjacent = FindAdjacentIsland(hoveredTile, selectedBrushTerrain, width, height);
                             var tilesToHighlight = new HashSet<Vector2Int>(adjacent);
                             int brushHalf = (brushSize - 1) / 2;
@@ -1528,8 +1032,6 @@ namespace DivineDragon.MapTools
                     }
                     else if (paintMode && isSampling && !IsEmptyTerrain(hoveredTerrainIdForHighlight))
                     {
-                        // While sampling in paint mode, highlight the hovered tile itself
-                        // so it looks like the tile we'd paint with if picked.
                         currentHighlightRegion = new HashSet<Vector2Int> { hoveredTile };
                         highlightTerrainId = hoveredTerrainIdForHighlight;
                     }
@@ -1545,12 +1047,8 @@ namespace DivineDragon.MapTools
             {
                 DrawRegionHighlight(currentHighlightRegion, startX, startZ, y, highlightTerrainId);
             }
-            
 
-            // Draw labels (only when not in ColorOnly mode)
             bool allowAnyLabels = displayMode != DisplayMode.ColorOnly;
-            
-            // Check if we're hovering over a tile and should show hover label (moved outside for scope)
             bool showHoverLabel = false;
             string hoveredTerrainId = "";
             if (isMouseOverGrid && hoveredTile.x >= 0 && hoveredTile.y >= 0)
@@ -1561,11 +1059,9 @@ namespace DivineDragon.MapTools
                     showHoverLabel = true;
                 }
             }
-            
-            // Initialize styles even in ColorOnly mode for hover labels
+
             if (isRepaint)
             {
-                // Prepare reusable styles for this frame
                 if (s_LabelStyle == null) s_LabelStyle = new GUIStyle();
                 if (s_LabelStyleSmall == null) s_LabelStyleSmall = new GUIStyle();
                 if (s_LabelStyleHover == null) s_LabelStyleHover = new GUIStyle();
@@ -1581,23 +1077,14 @@ namespace DivineDragon.MapTools
                 s_LabelStyleHover.alignment = TextAnchor.MiddleLeft;
                 s_LabelStyleHover.fontStyle = FontStyle.Bold;
                 s_LabelStyleHover.fontSize = hoverFont;
-                
-                // Determine LOD detail based on zoom (use global)
-                
-                // Per-frame caches
+
                 var frameTextCache = new Dictionary<string, string>(64);
 
-                // Only draw regular labels when not in ColorOnly mode
                 if (allowAnyLabels)
                 {
-                    // Always use island grouping for labels
-                    // Get cached islands (already retrieved above for borders)
                     List<TerrainIsland> islands = GetOrCreateIslands(selectedTerrain, cameraDistance);
-                    
-                    // Batch GUI for island labels
                     Handles.BeginGUI();
 
-                    // Build frame label nodes list
                     var usedKeys = new HashSet<string>();
                     var frameNodes = new List<LabelNode>(64);
 
@@ -1622,19 +1109,16 @@ namespace DivineDragon.MapTools
                             }
 
                             Color labelColor = ResolveLabelColor(island.terrainId);
-                            bool wantText = (displayMode != DisplayMode.ColorOnly);
-                            if (!wantText) continue;
-
-                            // Compute GUI anchor and label size for layout
-                            Vector2 anchorGui = HandleUtility.WorldToGUIPoint(worldPos);
+                            if (displayMode == DisplayMode.ColorOnly) continue;
                             GUIStyle styleRef = s_LabelStyle;
                             styleRef.normal.textColor = labelColor;
+
+                            Vector2 anchorGui = HandleUtility.WorldToGUIPoint(worldPos);
                             s_LabelContent.text = displayText;
                             Vector2 size = styleRef.CalcSize(s_LabelContent);
                             float totalWidth = size.x + LABEL_ICON_SIZE + LABEL_ICON_PADDING * 2f;
                             float totalHeight = size.y;
 
-                            // Node key: terrain + label tile
                             string nodeKey = island.terrainId + "|" + Mathf.RoundToInt(labelPos.x) + "x" + Mathf.RoundToInt(labelPos.y) + "|" + (int)textDisplayMode;
                             usedKeys.Add(nodeKey);
                             bool nodeExisted = s_LabelNodes.TryGetValue(nodeKey, out var node);
@@ -1643,137 +1127,27 @@ namespace DivineDragon.MapTools
                                 node = new LabelNode { key = nodeKey, posGui = anchorGui, preservedOffset = Vector2.zero };
                                 s_LabelNodes[nodeKey] = node;
                             }
-                            // Compute previous offset before updating anchor for movement preservation (only meaningful if node existed)
                             Vector2 prevOffset = nodeExisted ? (node.posGui - node.anchorGui) : Vector2.zero;
                             node.anchorGui = anchorGui;
                             node.width = totalWidth;
                             node.height = totalHeight;
                             node.seenThisFrame = true;
-                            // Priority: large islands get boost; hovered handled separately
-                            float pr = 1f;
-                            if (island.tiles != null && island.tiles.Count >= relaxLargeIslandTiles) pr *= relaxPriorityLarge;
-                            node.priority = pr;
-                            // If movement just started this frame, preserve current offset so we don't undo repulsion while moving
-                            if (justStartedMoving)
+
+                            node.posGui = anchorGui;
+                            if (relaxEnabled)
                             {
+                                node.priority = island.tiles.Count >= relaxLargeIslandTiles ? relaxPriorityLarge : 1f;
                                 node.preservedOffset = prevOffset;
+                                frameNodes.Add(node);
                             }
-
-                            frameNodes.Add(node);
                         }
                     }
 
-                    // Relax layout in screen-space (no leaders)
-                    if (relaxEnabled && frameNodes.Count > 0)
+                    if (relaxEnabled)
                     {
-                        // Radius shrinks with zoom-in to keep labels tight (based on camera distance)
-                        // Closer camera => smaller radius; farther => larger radius
-                        float tZoom = Mathf.InverseLerp(60f, 300f, cameraDistance);
-                        float radiusScale = Mathf.Lerp(0.4f, 1.0f, tZoom);
-                        float maxRadius = relaxRadiusPxBase * radiusScale;
-                        var sv = SceneView.currentDrawingSceneView;
-                        float viewW = sv != null ? sv.position.width : Screen.width;
-                        float viewH = sv != null ? sv.position.height : Screen.height;
-
-                        if (cameraIsMoving && relaxFreezeWhileMoving)
-                        {
-                            // Preserve repulsion offset while moving
-                            foreach (var n in frameNodes)
-                            {
-                                n.posGui = n.anchorGui + n.preservedOffset;
-                            }
-                            // Clamp to radius and viewport
-                            foreach (var n in frameNodes)
-                            {
-                                Vector2 d = n.posGui - n.anchorGui;
-                                float md = d.magnitude;
-                                if (md > maxRadius)
-                                {
-                                    n.posGui = n.anchorGui + d * (maxRadius / md);
-                                }
-                                float pad = relaxViewportPad;
-                                n.posGui.x = Mathf.Clamp(n.posGui.x, pad + n.width * 0.5f, viewW - pad - n.width * 0.5f);
-                                n.posGui.y = Mathf.Clamp(n.posGui.y, pad + n.height * 0.5f, viewH - pad - n.height * 0.5f);
-                            }
-                        }
-                        else
-                        {
-                            // Normal relaxation (when still, or when moving with freeze disabled)
-                            float anchorK = relaxAnchorK;
-                            int iters = relaxIterations;
-                            if (cameraIsMoving && !relaxFreezeWhileMoving)
-                            {
-                                // Slight boost while moving to reduce visible lag
-                                anchorK = Mathf.Max(relaxAnchorK, 0.28f);
-                                iters = Mathf.Max(relaxIterations, 4);
-                            }
-                            for (int iter = 0; iter < Mathf.Max(1, iters); iter++)
-                            {
-                                // Anchor spring
-                                foreach (var n in frameNodes)
-                                {
-                                    n.posGui += (n.anchorGui - n.posGui) * Mathf.Clamp01(anchorK);
-                                }
-                                // Repulsion
-                                for (int i = 0; i < frameNodes.Count; i++)
-                                {
-                                    var a = frameNodes[i];
-                                    for (int j = i + 1; j < frameNodes.Count; j++)
-                                    {
-                                        var b = frameNodes[j];
-                                        float ax = a.posGui.x, ay = a.posGui.y;
-                                        float bx = b.posGui.x, by = b.posGui.y;
-                                        float halfW = (a.width + b.width) * 0.5f;
-                                        float halfH = (a.height + b.height) * 0.5f;
-                                        float dx = ax - bx;
-                                        float dy = ay - by;
-                                        float ox = halfW - Mathf.Abs(dx);
-                                        float oy = halfH - Mathf.Abs(dy);
-                                        if (ox > 0 && oy > 0)
-                                        {
-                                            Vector2 push;
-                                            if (ox < oy)
-                                            {
-                                                push = new Vector2(Mathf.Sign(dx) * Mathf.Min(ox, relaxMaxStepPx), 0f);
-                                            }
-                                            else
-                                            {
-                                                push = new Vector2(0f, Mathf.Sign(dy) * Mathf.Min(oy, relaxMaxStepPx));
-                                            }
-                                            float pa = Mathf.Max(0.001f, a.priority);
-                                            float pb = Mathf.Max(0.001f, b.priority);
-                                            float sum = pa + pb;
-                                            a.posGui += push * (pb / sum);
-                                            b.posGui -= push * (pa / sum);
-                                        }
-                                    }
-                                }
-                                // Clamp to radius and viewport
-                                foreach (var n in frameNodes)
-                                {
-                                    Vector2 d = n.posGui - n.anchorGui;
-                                    float md = d.magnitude;
-                                    if (md > maxRadius)
-                                    {
-                                        n.posGui = n.anchorGui + d * (maxRadius / md);
-                                    }
-                                    float pad = relaxViewportPad;
-                                    n.posGui.x = Mathf.Clamp(n.posGui.x, pad + n.width * 0.5f, viewW - pad - n.width * 0.5f);
-                                    n.posGui.y = Mathf.Clamp(n.posGui.y, pad + n.height * 0.5f, viewH - pad - n.height * 0.5f);
-                                }
-                            }
-                            // After relaxing, update preserved offsets for next move start (only if not moving)
-                            if (!cameraIsMoving)
-                            {
-                                foreach (var n in frameNodes)
-                                {
-                                    n.preservedOffset = n.posGui - n.anchorGui;
-                                }
-                            }
-                        }
+                        RelaxLabelPositions(frameNodes, deltaTime, justStartedMoving, cameraIsMoving, cameraDistance, width, height);
                     }
 
-                    // Draw labels at relaxed positions, with sticky alpha-up smoothing
                     foreach (var island in islands)
                     {
                         if (IsEmptyTerrain(island.terrainId)) continue;
@@ -1792,36 +1166,23 @@ namespace DivineDragon.MapTools
                                 frameTextCache[textKey] = displayText;
                             }
                             Color labelColor = ResolveLabelColor(island.terrainId);
-                            bool wantText = (displayMode != DisplayMode.ColorOnly);
-                            if (!wantText) continue;
+                            if (displayMode == DisplayMode.ColorOnly) continue;
                             GUIStyle styleRef = s_LabelStyle;
                             styleRef.normal.textColor = labelColor;
 
-                            string k = island.terrainId + "|" + Mathf.RoundToInt(labelPos.x) + "x" + Mathf.RoundToInt(labelPos.y);
-                            float prev = 0f; labelAlphaStates.TryGetValue(k, out prev);
-                            float target = 1f;
-                            if (cameraIsMoving) target = Mathf.Max(prev, target);
-                            float dt = deltaTime;
-                            float newAlpha = Mathf.MoveTowards(prev, target, 10f * dt);
-                            labelAlphaStates[k] = newAlpha;
-                            if (newAlpha <= 0.02f) continue;
-
-                            // Fetch node position
                             string nodeKey = island.terrainId + "|" + Mathf.RoundToInt(labelPos.x) + "x" + Mathf.RoundToInt(labelPos.y) + "|" + (int)textDisplayMode;
                             if (s_LabelNodes.TryGetValue(nodeKey, out var node))
                             {
-                                DrawLabelWithColoredIconAtGui(worldPos, node.posGui, displayText, island.terrainId, styleRef, labelColor, newAlpha);
+                                DrawLabelWithColoredIconAtGui(worldPos, node.posGui, displayText, island.terrainId, styleRef, labelColor, 1f);
                             }
                             else
                             {
-                                // Fallback to anchor if cache missed
                                 Vector2 anchorGui = HandleUtility.WorldToGUIPoint(worldPos);
-                                DrawLabelWithColoredIconAtGui(worldPos, anchorGui, displayText, island.terrainId, styleRef, labelColor, newAlpha);
+                                DrawLabelWithColoredIconAtGui(worldPos, anchorGui, displayText, island.terrainId, styleRef, labelColor, 1f);
                             }
                         }
                     }
 
-                    // Cleanup cache entries not used this frame (mark-and-sweep)
                     foreach (var kv in s_LabelNodes.ToList())
                     {
                         if (!usedKeys.Contains(kv.Key))
@@ -1833,42 +1194,32 @@ namespace DivineDragon.MapTools
                     Handles.EndGUI();
                 }
             }
-            
-            // Draw hover label over the hovered tile (disabled during paint mode) - works in all display modes
+
             if (isRepaint && showHoverLabel && !paintMode)
             {
                 float hoverX = startX + hoveredTile.x * TILE_SIZE + TILE_SIZE * 0.5f;
                 float hoverZ = startZ + hoveredTile.y * TILE_SIZE + TILE_SIZE * 0.5f;
                 Vector3 hoverPos = new Vector3(hoverX, y, hoverZ);
-                // Normal hover label
                 string hoverDisplayText = GetTerrainDisplayText(hoveredTerrainId);
-                
                 Color hoverLabelColor = ResolveLabelColor(hoveredTerrainId, false);
-                
-                // Ensure hover style is initialized
                 if (s_LabelStyleHover == null) s_LabelStyleHover = new GUIStyle();
                 GUIStyle hoverStyle = s_LabelStyleHover;
                 hoverStyle.alignment = TextAnchor.MiddleLeft;
                 hoverStyle.fontStyle = FontStyle.Bold;
                 hoverStyle.fontSize = Mathf.RoundToInt(14 * textSize);
                 hoverStyle.normal.textColor = hoverLabelColor;
-                
-                // Batch begin for single hover label
                 Handles.BeginGUI();
                 DrawLabelWithColoredIcon(hoverPos, hoverDisplayText, hoveredTerrainId, hoverStyle, hoverLabelColor);
                 Handles.EndGUI();
             }
-            
-            // Draw brush preview when in paint mode
+
             if (paintMode && isMouseOverGrid)
             {
                 DrawBrushPreview(hoveredTile, width, height, startX, startZ, y);
             }
-            
-            // Draw previews when in Advanced tab
+
             if (uiTabIndex == 2 && selectedTerrain != null)
             {
-                // Always show resize preview when dimensions are different
                 if (newTerrainWidth != width || newTerrainHeight != height)
                 {
                     DrawResizePreview(width, height, startX, startZ, y);
@@ -1879,17 +1230,60 @@ namespace DivineDragon.MapTools
                     DrawAdvancedOperationPreview(width, height, startX, startZ, y);
                 }
             }
-            
-            // Repaint when camera is moving or has just stopped
+
             if (cameraIsMoving || cameraStillTime < 1f)
             {
                 sceneView.Repaint();
             }
         }
-        
+
         private static bool isPaintingStroke = false;
         private static int paintUndoGroup = -1;
         private static HashSet<int> paintedIndicesThisDrag = new HashSet<int>();
+
+        private static HashSet<Vector2Int> GetHoverConnectedRegion(TerrainAssetAdapter terrain, Vector2Int tile, int width, int height)
+        {
+            if (terrain == null) return null;
+            if (cachedHoverRegion != null && cachedRegionTerrain == terrain &&
+                cachedHoverTileForRegion == tile && cachedRegionWidth == width && cachedRegionHeight == height)
+            {
+                return cachedHoverRegion;
+            }
+            var region = FindConnectedRegion(terrain, tile, width, height);
+            cachedHoverRegion = region;
+            cachedRegionTerrain = terrain;
+            cachedHoverTileForRegion = tile;
+            cachedRegionWidth = width;
+            cachedRegionHeight = height;
+            return region;
+        }
+
+        private static void RelaxLabelPositions(
+            List<LabelNode> nodes,
+            float deltaTime,
+            bool justStartedMoving,
+            bool cameraIsMoving,
+            float cameraDistance,
+            int terrainWidth,
+            int terrainHeight)
+        {
+            if (nodes == null || nodes.Count == 0)
+            {
+                return;
+            }
+
+            foreach (var node in nodes)
+            {
+                if (relaxFreezeWhileMoving && cameraIsMoving && !justStartedMoving)
+                {
+                    node.posGui = node.anchorGui + node.preservedOffset;
+                }
+                else
+                {
+                    node.posGui = Vector2.Lerp(node.posGui, node.anchorGui, relaxAnchorK);
+                }
+            }
+        }
 
         private static void BeginPaintStroke()
         {
@@ -1922,7 +1316,6 @@ namespace DivineDragon.MapTools
             Event currentEvent = Event.current;
             if (externalInteractionLock)
             {
-                // Suppress hover and painting while another tool (Dispos) is active
                 isMouseOverGrid = false;
                 hoveredTile = new Vector2Int(-1, -1);
                 if (isPaintingStroke)
@@ -1933,44 +1326,35 @@ namespace DivineDragon.MapTools
             }
             Vector2Int prevHovered = hoveredTile;
             bool prevOver = isMouseOverGrid;
-            
-            // Get mouse position in world space
+
             Ray ray = HandleUtility.GUIPointToWorldRay(currentEvent.mousePosition);
-            
-            // Calculate intersection with grid plane
             float distance = (y - ray.origin.y) / ray.direction.y;
             if (distance < 0)
             {
                 isMouseOverGrid = false;
                 return;
             }
-            
+
             Vector3 hitPoint = ray.origin + ray.direction * distance;
-            
-            // Convert world position to grid coordinates
             int gridX = Mathf.FloorToInt((hitPoint.x - startX) / TILE_SIZE);
             int gridZ = Mathf.FloorToInt((hitPoint.z - startZ) / TILE_SIZE);
-            
-            // Check if mouse is over valid grid tile
+
             if (gridX >= 0 && gridX < width && gridZ >= 0 && gridZ < height)
             {
                 hoveredTile = new Vector2Int(gridX, gridZ);
                 isMouseOverGrid = true;
-                
-                // Only handle painting clicks when in paint mode
+
                 if (paintMode && !externalInteractionLock)
                 {
-                    // Handle mouse clicks
                     if (currentEvent.type == EventType.MouseDown || currentEvent.type == EventType.MouseDrag || currentEvent.type == EventType.MouseUp)
                     {
-                        if (currentEvent.button == 0) // Left click
+                        if (currentEvent.button == 0)
                         {
-                            // Check for modifier keys
-                            if (IsSamplingModifier(currentEvent) && currentEvent.type == EventType.MouseDown) // Ctrl/Cmd + Left click - pick/sample
+                            if (IsSamplingModifier(currentEvent) && currentEvent.type == EventType.MouseDown)
                             {
                                 PickTerrain(hoveredTile, width);
                             }
-                            else // Normal left click - paint
+                            else
                             {
                                 if (currentEvent.type == EventType.MouseDown)
                                 {
@@ -1989,8 +1373,7 @@ namespace DivineDragon.MapTools
                             currentEvent.Use();
                         }
                     }
-                    
-                    // Block scene navigation only for left mouse button when painting
+
                     if (currentEvent.type == EventType.Layout && currentEvent.button == 0)
                     {
                         HandleUtility.AddDefaultControl(GUIUtility.GetControlID(FocusType.Passive));
@@ -2006,34 +1389,15 @@ namespace DivineDragon.MapTools
                 }
             }
 
-            // Trigger a repaint when hover state changes to keep non-paint mode responsive
             if (isMouseOverGrid != prevOver || hoveredTile != prevHovered)
             {
                 cachedHoverRegion = null;
                 SceneView.RepaintAll();
-                // Force the inspector window to repaint to update the hover information
                 if (instance != null)
                 {
                     instance.Repaint();
                 }
             }
-        }
-
-        private static HashSet<Vector2Int> GetHoverConnectedRegion(TerrainAssetAdapter terrain, Vector2Int tile, int width, int height)
-        {
-            if (terrain == null) return null;
-            if (cachedHoverRegion != null && cachedRegionTerrain == terrain &&
-                cachedHoverTileForRegion == tile && cachedRegionWidth == width && cachedRegionHeight == height)
-            {
-                return cachedHoverRegion;
-            }
-            var region = FindConnectedRegion(terrain, tile, width, height);
-            cachedHoverRegion = region;
-            cachedRegionTerrain = terrain;
-            cachedHoverTileForRegion = tile;
-            cachedRegionWidth = width;
-            cachedRegionHeight = height;
-            return region;
         }
 
         private static void PaintTerrainDedup(Vector2Int centerTile, int width, int height)
@@ -2043,11 +1407,10 @@ namespace DivineDragon.MapTools
             if (grid == null) return;
             var tiles = selectedTerrain.m_Terrains;
             if (tiles == null) return;
-            
+
             int halfSize = (brushSize - 1) / 2;
             bool modified = false;
-            
-            // Now actually paint
+
             for (int dx = -halfSize; dx <= halfSize; dx++)
             {
                 for (int dz = -halfSize; dz <= halfSize; dz++)
@@ -2085,8 +1448,7 @@ namespace DivineDragon.MapTools
                 SceneView.RepaintAll();
             }
         }
-        
-        
+
         private static HashSet<Vector2Int> FindAdjacentIsland(Vector2Int centerTile, string targetTerrain, int width, int height)
         {
             HashSet<Vector2Int> island = new HashSet<Vector2Int>();
@@ -2099,11 +1461,10 @@ namespace DivineDragon.MapTools
 
             if (IsEmptyTerrain(targetTerrain))
                 return island;
-            
-            // Get brush area
+
             int halfSize = (brushSize - 1) / 2;
             HashSet<Vector2Int> brushArea = new HashSet<Vector2Int>();
-            
+
             for (int dx = -halfSize; dx <= halfSize; dx++)
             {
                 for (int dz = -halfSize; dz <= halfSize; dz++)
@@ -2116,12 +1477,10 @@ namespace DivineDragon.MapTools
                     }
                 }
             }
-            
-            // Check tiles adjacent to brush area
+
             HashSet<Vector2Int> visited = new HashSet<Vector2Int>();
             Queue<Vector2Int> toCheck = new Queue<Vector2Int>();
-            
-            // Start with tiles adjacent to brush area
+
             foreach (var brushTile in brushArea)
             {
                 foreach (var dir in Directions4)
@@ -2141,13 +1500,12 @@ namespace DivineDragon.MapTools
                     }
                 }
             }
-            
-            // Flood fill to find connected island
+
             while (toCheck.Count > 0)
             {
                 var current = toCheck.Dequeue();
                 island.Add(current);
-                
+
                 foreach (var dir in Directions4)
                 {
                     var neighbor = current + dir;
@@ -2164,7 +1522,7 @@ namespace DivineDragon.MapTools
                     }
                 }
             }
-            
+
             return island;
         }
         
@@ -3231,477 +2589,6 @@ namespace DivineDragon.MapTools
                 new Vector3(tileX + TILE_SIZE, y + 0.08f, tileZ),
                 new Vector3(tileX, y + 0.08f, tileZ + TILE_SIZE), 2f
             );
-        }
-        
-        private void ResizeTerrain()
-        {
-            if (selectedTerrain == null) return;
-            
-            RecordTerrainUndo(selectedTerrain, "Resize Terrain");
-            
-            int oldWidth = selectedTerrain.m_Width;
-            int oldHeight = selectedTerrain.m_Height;
-            string[] oldTerrains = selectedTerrain.m_Terrains;
-            
-            // Create 2D representation of old data
-            string[,] oldGrid = new string[oldHeight, oldWidth];
-            for (int y = 0; y < oldHeight; y++)
-            {
-                for (int x = 0; x < oldWidth; x++)
-                {
-                    int index = y * oldWidth + x;
-                    if (index < oldTerrains.Length)
-                    {
-                        oldGrid[y, x] = oldTerrains[index];
-                    }
-                }
-            }
-            
-            // Create new grid with MTID_Nothing as default
-            string[,] newGrid = new string[newTerrainHeight, newTerrainWidth];
-            for (int y = 0; y < newTerrainHeight; y++)
-            {
-                for (int x = 0; x < newTerrainWidth; x++)
-                {
-                    newGrid[y, x] = "MTID_Nothing";
-                }
-            }
-            
-            // Calculate offsets based on expand/shrink direction
-            int offsetX = 0;
-            int offsetY = 0;
-            
-            int widthChange = newTerrainWidth - oldWidth;
-            int heightChange = newTerrainHeight - oldHeight;
-            
-            // Calculate X offset
-            if (widthChange > 0) // Expanding - always to the right
-            {
-                offsetX = 0; // Expand right means existing data stays at same position
-            }
-            else if (widthChange < 0) // Shrinking
-            {
-                switch (shrinkHorizontal)
-                {
-                    case ShrinkDirection.Left:
-                        offsetX = widthChange;
-                        break;
-                    case ShrinkDirection.Right:
-                        offsetX = 0;
-                        break;
-                    case ShrinkDirection.Center:
-                        offsetX = widthChange / 2;
-                        break;
-                }
-            }
-            
-            // Calculate Y offset
-            if (heightChange > 0) // Expanding - always to the bottom
-            {
-                offsetY = 0; // Expand bottom means existing data stays at same position
-            }
-            else if (heightChange < 0) // Shrinking
-            {
-                switch (shrinkVertical)
-                {
-                    case ShrinkDirectionVertical.Top:
-                        offsetY = heightChange;
-                        break;
-                    case ShrinkDirectionVertical.Bottom:
-                        offsetY = 0;
-                        break;
-                    case ShrinkDirectionVertical.Center:
-                        offsetY = heightChange / 2;
-                        break;
-                }
-            }
-            
-            // Copy old data to new grid with offset
-            for (int y = 0; y < oldHeight; y++)
-            {
-                for (int x = 0; x < oldWidth; x++)
-                {
-                    int newX = x + offsetX;
-                    int newY = y + offsetY;
-                    
-                    if (newX >= 0 && newX < newTerrainWidth && 
-                        newY >= 0 && newY < newTerrainHeight)
-                    {
-                        newGrid[newY, newX] = oldGrid[y, x];
-                    }
-                }
-            }
-            
-            // Convert back to 1D array
-            string[] newTerrains = new string[newTerrainWidth * newTerrainHeight];
-            for (int y = 0; y < newTerrainHeight; y++)
-            {
-                for (int x = 0; x < newTerrainWidth; x++)
-                {
-                    newTerrains[y * newTerrainWidth + x] = newGrid[y, x];
-                }
-            }
-            
-            // Apply changes to terrain
-            selectedTerrain.m_Width = newTerrainWidth;
-            selectedTerrain.m_Height = newTerrainHeight;
-            selectedTerrain.m_Terrains = newTerrains;
-            
-            MarkTerrainDirty(selectedTerrain);
-            
-            // Clear caches
-            islandCache.Clear();
-            lastCachedTerrain = null;
-            cachedHoverRegion = null;
-            s_LabelNodes.Clear();
-            
-            SceneView.RepaintAll();
-            Debug.Log($"Terrain resized from {oldWidth}x{oldHeight} to {newTerrainWidth}x{newTerrainHeight}");
-        }
-        
-        private static void MirrorTerrainHorizontal()
-        {
-            if (selectedTerrain == null) return;
-            
-            RecordTerrainUndo(selectedTerrain, "Mirror Terrain Horizontal");
-            
-            int width = selectedTerrain.m_Width;
-            int height = selectedTerrain.m_Height;
-            string[] terrains = selectedTerrain.m_Terrains;
-            
-            // Create mirrored array
-            string[] mirrored = new string[terrains.Length];
-            
-            for (int y = 0; y < height; y++)
-            {
-                for (int x = 0; x < width; x++)
-                {
-                    int srcIndex = y * width + x;
-                    int destIndex = y * width + (width - 1 - x);
-                    
-                    if (srcIndex < terrains.Length)
-                    {
-                        mirrored[destIndex] = terrains[srcIndex];
-                    }
-                }
-            }
-            
-            selectedTerrain.m_Terrains = mirrored;
-            MarkTerrainDirty(selectedTerrain);
-            
-            // Clear caches
-            islandCache.Clear();
-            lastCachedTerrain = null;
-            cachedHoverRegion = null;
-            s_LabelNodes.Clear();
-            
-            SceneView.RepaintAll();
-            Debug.Log("Terrain mirrored horizontally");
-        }
-        
-        private static void MirrorTerrainVertical()
-        {
-            if (selectedTerrain == null) return;
-            
-            RecordTerrainUndo(selectedTerrain, "Mirror Terrain Vertical");
-            
-            int width = selectedTerrain.m_Width;
-            int height = selectedTerrain.m_Height;
-            string[] terrains = selectedTerrain.m_Terrains;
-            
-            // Create mirrored array
-            string[] mirrored = new string[terrains.Length];
-            
-            for (int y = 0; y < height; y++)
-            {
-                for (int x = 0; x < width; x++)
-                {
-                    int srcIndex = y * width + x;
-                    int destIndex = (height - 1 - y) * width + x;
-                    
-                    if (srcIndex < terrains.Length)
-                    {
-                        mirrored[destIndex] = terrains[srcIndex];
-                    }
-                }
-            }
-            
-            selectedTerrain.m_Terrains = mirrored;
-            MarkTerrainDirty(selectedTerrain);
-            
-            // Clear caches
-            islandCache.Clear();
-            lastCachedTerrain = null;
-            cachedHoverRegion = null;
-            s_LabelNodes.Clear();
-            
-            SceneView.RepaintAll();
-            Debug.Log("Terrain mirrored vertically");
-        }
-        
-        private static void ShiftTerrainHorizontal(int amount)
-        {
-            if (selectedTerrain == null) return;
-            
-            RecordTerrainUndo(selectedTerrain, $"Shift Terrain {(amount > 0 ? "Right" : "Left")}");
-            
-            int width = selectedTerrain.m_Width;
-            int height = selectedTerrain.m_Height;
-            string[] terrains = selectedTerrain.m_Terrains;
-            
-            // Create shifted array, fill with MTID_Nothing by default
-            string[] shifted = new string[terrains.Length];
-            for (int i = 0; i < shifted.Length; i++)
-            {
-                shifted[i] = "MTID_Nothing";
-            }
-            
-            // Copy data to shifted positions
-            for (int y = 0; y < height; y++)
-            {
-                for (int x = 0; x < width; x++)
-                {
-                    int srcIndex = y * width + x;
-                    int newX = x + amount;
-                    
-                    // Only copy if the new position is within bounds
-                    if (newX >= 0 && newX < width && srcIndex < terrains.Length)
-                    {
-                        int destIndex = y * width + newX;
-                        shifted[destIndex] = terrains[srcIndex];
-                    }
-                }
-            }
-            
-            selectedTerrain.m_Terrains = shifted;
-            MarkTerrainDirty(selectedTerrain);
-            
-            // Clear caches
-            islandCache.Clear();
-            lastCachedTerrain = null;
-            cachedHoverRegion = null;
-            s_LabelNodes.Clear();
-            
-            SceneView.RepaintAll();
-            Debug.Log($"Terrain shifted horizontally by {amount}");
-        }
-        
-        private static void ShiftTerrainVertical(int amount)
-        {
-            if (selectedTerrain == null) return;
-            
-            RecordTerrainUndo(selectedTerrain, $"Shift Terrain {(amount > 0 ? "Down" : "Up")}");
-            
-            int width = selectedTerrain.m_Width;
-            int height = selectedTerrain.m_Height;
-            string[] terrains = selectedTerrain.m_Terrains;
-            
-            // Create shifted array, fill with MTID_Nothing by default
-            string[] shifted = new string[terrains.Length];
-            for (int i = 0; i < shifted.Length; i++)
-            {
-                shifted[i] = "MTID_Nothing";
-            }
-            
-            // Copy data to shifted positions
-            for (int y = 0; y < height; y++)
-            {
-                for (int x = 0; x < width; x++)
-                {
-                    int srcIndex = y * width + x;
-                    int newY = y + amount;
-                    
-                    // Only copy if the new position is within bounds
-                    if (newY >= 0 && newY < height && srcIndex < terrains.Length)
-                    {
-                        int destIndex = newY * width + x;
-                        shifted[destIndex] = terrains[srcIndex];
-                    }
-                }
-            }
-            
-            selectedTerrain.m_Terrains = shifted;
-            MarkTerrainDirty(selectedTerrain);
-            
-            // Clear caches
-            islandCache.Clear();
-            lastCachedTerrain = null;
-            cachedHoverRegion = null;
-            s_LabelNodes.Clear();
-            
-            SceneView.RepaintAll();
-            Debug.Log($"Terrain shifted vertically by {amount}");
-        }
-        
-        private static void GenerateResizePreview()
-        {
-            if (selectedTerrain == null) return;
-            
-            int oldWidth = selectedTerrain.m_Width;
-            int oldHeight = selectedTerrain.m_Height;
-            
-            // For expand preview, just show current terrain
-            // The scene drawing will show the new areas in green
-            previewTerrains = (string[])selectedTerrain.m_Terrains.Clone();
-        }
-        
-        private static void GenerateMirrorPreview()
-        {
-            if (selectedTerrain == null) return;
-            
-            int width = selectedTerrain.m_Width;
-            int height = selectedTerrain.m_Height;
-            string[] terrains = selectedTerrain.m_Terrains;
-            
-            previewTerrains = new string[terrains.Length];
-            
-            if (mirrorPreviewMode == MirrorMode.Horizontal)
-            {
-                // Mirror horizontally
-                for (int y = 0; y < height; y++)
-                {
-                    for (int x = 0; x < width; x++)
-                    {
-                        int srcIndex = y * width + x;
-                        int destIndex = y * width + (width - 1 - x);
-                        
-                        if (srcIndex < terrains.Length)
-                        {
-                            previewTerrains[destIndex] = terrains[srcIndex];
-                        }
-                    }
-                }
-            }
-            else if (mirrorPreviewMode == MirrorMode.Vertical)
-            {
-                // Mirror vertically
-                for (int y = 0; y < height; y++)
-                {
-                    for (int x = 0; x < width; x++)
-                    {
-                        int srcIndex = y * width + x;
-                        int destIndex = (height - 1 - y) * width + x;
-                        
-                        if (srcIndex < terrains.Length)
-                        {
-                            previewTerrains[destIndex] = terrains[srcIndex];
-                        }
-                    }
-                }
-            }
-        }
-        
-        private static void GenerateShiftPreview()
-        {
-            if (selectedTerrain == null) return;
-            
-            int width = selectedTerrain.m_Width;
-            int height = selectedTerrain.m_Height;
-            string[] terrains = selectedTerrain.m_Terrains;
-            
-            // Initialize with MTID_Nothing
-            previewTerrains = new string[terrains.Length];
-            for (int i = 0; i < previewTerrains.Length; i++)
-            {
-                previewTerrains[i] = "MTID_Nothing";
-            }
-            
-            int shiftX = 0, shiftY = 0;
-            switch (shiftPreviewMode)
-            {
-                case ShiftDirection.Left:
-                    shiftX = -shiftAmount;
-                    break;
-                case ShiftDirection.Right:
-                    shiftX = shiftAmount;
-                    break;
-                case ShiftDirection.Up:
-                    shiftY = -shiftAmount;
-                    break;
-                case ShiftDirection.Down:
-                    shiftY = shiftAmount;
-                    break;
-            }
-            
-            // Copy shifted data
-            for (int y = 0; y < height; y++)
-            {
-                for (int x = 0; x < width; x++)
-                {
-                    int srcIndex = y * width + x;
-                    int newX = x + shiftX;
-                    int newY = y + shiftY;
-                    
-                    if (newX >= 0 && newX < width && newY >= 0 && newY < height && srcIndex < terrains.Length)
-                    {
-                        int destIndex = newY * width + newX;
-                        previewTerrains[destIndex] = terrains[srcIndex];
-                    }
-                }
-            }
-        }
-        
-        private static void DrawAdvancedOperationPreview(int width, int height, float startX, float startZ, float y)
-        {
-            if (previewTerrains == null || terrainDatabase == null) return;
-            
-            // Draw current terrain in semi-transparent green
-            Color currentColor = new Color(0f, 1f, 0f, 0.3f);
-            for (int row = 0; row < height; row++)
-            {
-                for (int col = 0; col < width; col++)
-                {
-                    int index = row * width + col;
-                    if (index >= selectedTerrain.m_Terrains.Length) continue;
-                    
-                    string terrainId = selectedTerrain.m_Terrains[index];
-                    if (IsEmptyTerrain(terrainId) || terrainId == "MTID_Nothing") continue;
-                    
-                    float tileX = startX + col * TILE_SIZE;
-                    float tileZ = startZ + row * TILE_SIZE;
-                    
-                    Vector3[] verts = new Vector3[]
-                    {
-                        new Vector3(tileX, y + 0.02f, tileZ),
-                        new Vector3(tileX + TILE_SIZE, y + 0.02f, tileZ),
-                        new Vector3(tileX + TILE_SIZE, y + 0.02f, tileZ + TILE_SIZE),
-                        new Vector3(tileX, y + 0.02f, tileZ + TILE_SIZE)
-                    };
-                    
-                    Handles.DrawSolidRectangleWithOutline(verts, currentColor, Color.clear);
-                }
-            }
-            
-            // Draw preview terrain in semi-transparent blue
-            Color previewColor = new Color(0f, 0.5f, 1f, 0.5f);
-            for (int row = 0; row < height; row++)
-            {
-                for (int col = 0; col < width; col++)
-                {
-                    int index = row * width + col;
-                    if (index >= previewTerrains.Length) continue;
-                    
-                    string terrainId = previewTerrains[index];
-                    if (IsEmptyTerrain(terrainId) || terrainId == "MTID_Nothing") continue;
-                    
-                    float tileX = startX + col * TILE_SIZE;
-                    float tileZ = startZ + row * TILE_SIZE;
-                    
-                    // Get color from terrain database
-                    Color tileColor = terrainDatabase.GetTerrainColor(terrainId, previewColor);
-                    tileColor.a = 0.6f; // Make semi-transparent
-                    
-                    Vector3[] verts = new Vector3[]
-                    {
-                        new Vector3(tileX, y + 0.04f, tileZ),
-                        new Vector3(tileX + TILE_SIZE, y + 0.04f, tileZ),
-                        new Vector3(tileX + TILE_SIZE, y + 0.04f, tileZ + TILE_SIZE),
-                        new Vector3(tileX, y + 0.04f, tileZ + TILE_SIZE)
-                    };
-                    
-                    Handles.DrawSolidRectangleWithOutline(verts, tileColor, Color.blue);
-                }
-            }
         }
         
         private static void DrawTerrainButton(TerrainType terrain, bool isUsed)

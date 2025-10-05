@@ -17,15 +17,21 @@ namespace DivineDragon.MapTools
             float colorBrightness,
             string outputPath)
         {
-            if (terrain?.IsValid != true || terrain.Terrains == null)
+            if (terrain?.IsValid != true)
             {
                 EditorUtility.DisplayDialog("Export Error", "No terrain selected or terrain data is null.", "OK");
                 return;
             }
 
-            string[] tiles = terrain.Terrains;
-            int width = terrain.Width;
-            int height = terrain.Height;
+            TerrainVirtualGrid grid = TerrainVirtualGridCache.GetGrid(terrain);
+            if (grid == null)
+            {
+                EditorUtility.DisplayDialog("Export Error", "Unable to interpret terrain data for export.", "OK");
+                return;
+            }
+
+            int width = grid.Width;
+            int height = grid.Height;
             
             // Create texture with appropriate size
             int textureWidth = width * pixelsPerTile;
@@ -49,7 +55,7 @@ namespace DivineDragon.MapTools
             texture.SetPixels(pixels);
             
             // Draw terrain tiles
-            DrawTerrainTiles(texture, width, height, tiles, database, pixelsPerTile, includeGrid, gridThickness, colorBrightness);
+            DrawTerrainTiles(texture, grid, database, pixelsPerTile, includeGrid, gridThickness, colorBrightness);
             
             // Draw grid lines if requested
             if (includeGrid)
@@ -87,25 +93,22 @@ namespace DivineDragon.MapTools
         
         private static void DrawTerrainTiles(
             Texture2D texture,
-            int width,
-            int height,
-            string[] tiles,
+            TerrainVirtualGrid grid,
             TerrainTypeDatabase database,
             int pixelsPerTile,
             bool includeGrid,
             int gridThickness,
             float colorBrightness)
         {
+            int width = grid.Width;
+            int height = grid.Height;
+
             for (int y = 0; y < height; y++)
             {
                 for (int x = 0; x < width; x++)
                 {
-                    int terrainIndex = y * width + x;
-                    if (terrainIndex >= tiles.Length)
-                        continue;
-                    
-                    string terrainId = tiles[terrainIndex];
-                    if (string.IsNullOrEmpty(terrainId))
+                    string terrainId = grid.GetTerrainId(x, y);
+                    if (TerrainVirtualGridCache.IsEmptyTerrain(terrainId))
                         continue;
                     
                     // Get color for this terrain type
