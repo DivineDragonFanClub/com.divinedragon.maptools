@@ -446,7 +446,14 @@ namespace DivineDragon.MapTools
             lastCachedTerrain = null;
             cachedHoverRegion = null;
             s_LabelNodes.Clear();
+            s_VirtualGrids.Clear();
+            s_LoggedInsufficientTiles.Clear();
+            s_LoggedOverflowTiles.Clear();
             SceneView.RepaintAll();
+            if (instance != null)
+            {
+                instance.Repaint();
+            }
         }
         
         private void LoadTerrainDatabase()
@@ -1890,6 +1897,10 @@ namespace DivineDragon.MapTools
             Undo.IncrementCurrentGroup();
             Undo.SetCurrentGroupName("Paint Terrain");
             paintUndoGroup = Undo.GetCurrentGroup();
+            if (selectedTerrain.Asset != null)
+            {
+                Undo.RegisterCompleteObjectUndo(selectedTerrain.Asset, "Paint Terrain");
+            }
             paintedIndicesThisDrag.Clear();
             isPaintingStroke = true;
         }
@@ -2035,13 +2046,6 @@ namespace DivineDragon.MapTools
             
             int halfSize = (brushSize - 1) / 2;
             bool modified = false;
-            
-            // Record undo state for each paint operation during the stroke
-            // Unity needs a record for each modification to properly track array changes
-            if (isPaintingStroke)
-            {
-                RecordTerrainUndo(selectedTerrain, "Paint Terrain");
-            }
             
             // Now actually paint
             for (int dx = -halfSize; dx <= halfSize; dx++)
