@@ -199,6 +199,8 @@ namespace DivineDragon.MapTools
         {
             public float offset;
             public TerrainHeightMode mode;
+            public bool autoSelectCollider = true;
+            public string colliderPath = string.Empty;
         }
 
         private class TerrainHeightCache
@@ -215,6 +217,9 @@ namespace DivineDragon.MapTools
             public float[] cornerSamples;
             public bool anyCenterHits;
             public bool anyCornerHits;
+            public bool autoSelection;
+            public string colliderPath;
+            public string requestedColliderPath;
         }
 
         private static readonly Dictionary<string, TerrainHeightSettings> terrainHeightSettings = new Dictionary<string, TerrainHeightSettings>(StringComparer.OrdinalIgnoreCase);
@@ -416,6 +421,29 @@ namespace DivineDragon.MapTools
             InvalidateTerrainHeightCache(null);
         }
 
+        private static void RemoveRaycastFailureEntries(string assetPath)
+        {
+            if (string.IsNullOrEmpty(assetPath))
+            {
+                return;
+            }
+
+            raycastLogRemovalBuffer.Clear();
+            foreach (string key in loggedRaycastFailures)
+            {
+                string[] parts = key.Split('|');
+                if (parts.Length >= 2 && string.Equals(parts[1], assetPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    raycastLogRemovalBuffer.Add(key);
+                }
+            }
+
+            foreach (string key in raycastLogRemovalBuffer)
+            {
+                loggedRaycastFailures.Remove(key);
+            }
+        }
+
         private static void InvalidateTerrainHeightCache(TerrainAssetAdapter terrain)
         {
             if (terrain == null)
@@ -427,26 +455,12 @@ namespace DivineDragon.MapTools
             }
 
             terrainHeightCache.Remove(terrain);
+            sceneColliderCache.Clear();
 
             if (terrain?.Asset != null)
             {
                 string assetPath = AssetDatabase.GetAssetPath(terrain.Asset);
-                if (!string.IsNullOrEmpty(assetPath))
-                {
-                    raycastLogRemovalBuffer.Clear();
-                    foreach (string key in loggedRaycastFailures)
-                    {
-                        if (string.Equals(key, assetPath, StringComparison.OrdinalIgnoreCase) || key.EndsWith("|" + assetPath, StringComparison.OrdinalIgnoreCase))
-                        {
-                            raycastLogRemovalBuffer.Add(key);
-                        }
-                    }
-
-                    foreach (string key in raycastLogRemovalBuffer)
-                    {
-                        loggedRaycastFailures.Remove(key);
-                    }
-                }
+                RemoveRaycastFailureEntries(assetPath);
             }
         }
 
@@ -546,10 +560,24 @@ namespace DivineDragon.MapTools
                                 mode = (TerrainHeightMode)Mathf.Clamp(prefs.modes[i], 0, (int)TerrainHeightMode.RaycastMesh);
                             }
 
+                            bool autoSelect = true;
+                            if (prefs.autoColliderFlags != null && i < prefs.autoColliderFlags.Count)
+                            {
+                                autoSelect = prefs.autoColliderFlags[i] != 0;
+                            }
+
+                            string colliderPath = string.Empty;
+                            if (prefs.colliderPaths != null && i < prefs.colliderPaths.Count)
+                            {
+                                colliderPath = prefs.colliderPaths[i] ?? string.Empty;
+                            }
+
                             terrainHeightSettings[path] = new TerrainHeightSettings
                             {
                                 offset = offset,
-                                mode = mode
+                                mode = mode,
+                                autoSelectCollider = autoSelect,
+                                colliderPath = colliderPath
                             };
                         }
                     }
@@ -572,6 +600,8 @@ namespace DivineDragon.MapTools
                 prefs.paths.Add(kvp.Key);
                 prefs.heights.Add(kvp.Value.offset);
                 prefs.modes.Add((int)kvp.Value.mode);
+                prefs.autoColliderFlags.Add(kvp.Value.autoSelectCollider ? 1 : 0);
+                prefs.colliderPaths.Add(kvp.Value.colliderPath ?? string.Empty);
             }
 
             string json = EditorJsonUtility.ToJson(prefs);
@@ -624,7 +654,37 @@ namespace DivineDragon.MapTools
             settings.mode = mode;
             terrainHeightSettings[path] = settings;
             InvalidateTerrainHeightCache(terrain);
-            loggedRaycastFailures.Remove(path);
+            RemoveRaycastFailureEntries(path);
+            sceneColliderCache.Clear();
+            SaveTerrainHeightPreferences();
+        }
+
+        private static void SetColliderSelectionForTerrain(TerrainAssetAdapter terrain, bool autoSelect, string colliderPath)
+        {
+            if (terrain?.Asset == null)
+            {
+                return;
+            }
+
+            string path = AssetDatabase.GetAssetPath(terrain.Asset);
+            if (string.IsNullOrEmpty(path))
+            {
+                return;
+            }
+
+            TerrainHeightSettings settings = GetHeightSettingsForPath(path);
+            string normalizedPath = autoSelect ? string.Empty : (colliderPath ?? string.Empty);
+            if (settings.autoSelectCollider == autoSelect && string.Equals(settings.colliderPath ?? string.Empty, normalizedPath, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            settings.autoSelectCollider = autoSelect;
+            settings.colliderPath = normalizedPath;
+            terrainHeightSettings[path] = settings;
+            InvalidateTerrainHeightCache(terrain);
+            RemoveRaycastFailureEntries(path);
+            sceneColliderCache.Clear();
             SaveTerrainHeightPreferences();
         }
 
@@ -650,17 +710,105 @@ namespace DivineDragon.MapTools
             return GetSceneKey(SceneManager.GetActiveScene());
         }
 
-        private static MeshCollider GetSceneMeshCollider(Scene scene)
+        private static string GetColliderSelectionKey(TerrainHeightSettings settings)
         {
-            string sceneKey = GetSceneKey(scene);
-            if (sceneColliderCache.TryGetValue(sceneKey, out MeshCollider cached) && cached != null)
+            if (settings == null || settings.autoSelectCollider || string.IsNullOrEmpty(settings.colliderPath))
             {
+                return "<auto>";
+            }
+
+            return settings.colliderPath;
+        }
+
+        private static MeshCollider GetSceneMeshCollider(Scene scene, TerrainHeightSettings settings, TerrainAssetAdapter terrain, bool logWarnings, out string colliderPath)
+        {
+            colliderPath = string.Empty;
+            string sceneKey = GetSceneKey(scene);
+            string selectionKey = GetColliderSelectionKey(settings);
+            string cacheKey = sceneKey + "|" + selectionKey;
+
+            if (sceneColliderCache.TryGetValue(cacheKey, out MeshCollider cached) && cached != null)
+            {
+                colliderPath = GetTransformPath(cached.transform);
                 return cached;
             }
 
-            sceneColliderCache.Remove(sceneKey);
+            sceneColliderCache.Remove(cacheKey);
 
-            MeshCollider bmapCandidate = null;
+            MeshCollider collider = null;
+
+            if (settings != null && !settings.autoSelectCollider && !string.IsNullOrEmpty(settings.colliderPath))
+            {
+                collider = FindMeshColliderByPath(scene, settings.colliderPath);
+                if (collider == null && logWarnings)
+                {
+                    LogRaycastFailure(terrain, sceneKey, settings.colliderPath, $"MeshCollider '{settings.colliderPath}' not found; falling back to auto selection.");
+                }
+            }
+
+            if (collider == null)
+            {
+                collider = FindDefaultMeshCollider(scene);
+                if (collider == null && logWarnings)
+                {
+                    LogRaycastFailure(terrain, sceneKey, string.Empty, "No MeshCollider found in the active scene. Using fixed height instead.");
+                }
+            }
+
+            if (collider != null)
+            {
+                colliderPath = GetTransformPath(collider.transform);
+
+                bool cacheResult = true;
+                if (settings != null && !settings.autoSelectCollider && !string.IsNullOrEmpty(settings.colliderPath))
+                {
+                    if (!string.Equals(colliderPath, settings.colliderPath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        cacheResult = false;
+                    }
+                }
+
+                if (cacheResult)
+                {
+                    sceneColliderCache[cacheKey] = collider;
+                }
+            }
+
+            return collider;
+        }
+
+        private static MeshCollider FindMeshColliderByPath(Scene scene, string colliderPath)
+        {
+            if (string.IsNullOrEmpty(colliderPath))
+            {
+                return null;
+            }
+
+            MeshCollider[] colliders = UnityEngine.Object.FindObjectsOfType<MeshCollider>(true);
+            foreach (MeshCollider collider in colliders)
+            {
+                if (collider == null || collider.sharedMesh == null)
+                {
+                    continue;
+                }
+
+                if (!collider.gameObject.scene.IsValid() || collider.gameObject.scene != scene)
+                {
+                    continue;
+                }
+
+                string path = GetTransformPath(collider.transform);
+                if (string.Equals(path, colliderPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    return collider;
+                }
+            }
+
+            return null;
+        }
+
+        private static MeshCollider FindDefaultMeshCollider(Scene scene)
+        {
             MeshCollider fallback = null;
 
             MeshCollider[] colliders = UnityEngine.Object.FindObjectsOfType<MeshCollider>(true);
@@ -683,8 +831,7 @@ namespace DivineDragon.MapTools
 
                 if (IsUnderBmap(collider.transform))
                 {
-                    bmapCandidate = collider;
-                    break;
+                    return collider;
                 }
 
                 if (fallback == null)
@@ -693,13 +840,35 @@ namespace DivineDragon.MapTools
                 }
             }
 
-            MeshCollider result = bmapCandidate ?? fallback;
-            if (result != null)
+            return fallback;
+        }
+
+        private static List<MeshCollider> GetSceneColliders(Scene scene)
+        {
+            MeshCollider[] colliders = UnityEngine.Object.FindObjectsOfType<MeshCollider>(true);
+            List<MeshCollider> results = new List<MeshCollider>();
+            foreach (MeshCollider collider in colliders)
             {
-                sceneColliderCache[sceneKey] = result;
+                if (collider == null || collider.sharedMesh == null)
+                {
+                    continue;
+                }
+
+                if (!collider.gameObject.scene.IsValid() || collider.gameObject.scene != scene)
+                {
+                    continue;
+                }
+
+                if (!collider.enabled)
+                {
+                    continue;
+                }
+
+                results.Add(collider);
             }
 
-            return result;
+            results.Sort((a, b) => string.Compare(GetTransformPath(a.transform), GetTransformPath(b.transform), StringComparison.OrdinalIgnoreCase));
+            return results;
         }
 
         private static bool IsUnderBmap(Transform transform)
@@ -717,7 +886,25 @@ namespace DivineDragon.MapTools
             return false;
         }
 
-        private static string BuildRaycastLogKey(TerrainAssetAdapter terrain, string sceneKey)
+        private static string GetTransformPath(Transform transform)
+        {
+            if (transform == null)
+            {
+                return string.Empty;
+            }
+
+            List<string> segments = new List<string>();
+            Transform current = transform;
+            while (current != null)
+            {
+                segments.Add(current.name);
+                current = current.parent;
+            }
+            segments.Reverse();
+            return string.Join("/", segments);
+        }
+
+        private static string BuildRaycastLogKey(TerrainAssetAdapter terrain, string sceneKey, string colliderPath)
         {
             string path = string.Empty;
             if (terrain?.Asset != null)
@@ -725,19 +912,23 @@ namespace DivineDragon.MapTools
                 path = AssetDatabase.GetAssetPath(terrain.Asset);
             }
 
-            return string.IsNullOrEmpty(sceneKey) ? path : sceneKey + "|" + path;
+            string terrainSegment = path ?? string.Empty;
+            string sceneSegment = sceneKey ?? string.Empty;
+            string colliderSegment = colliderPath ?? string.Empty;
+            return sceneSegment + "|" + terrainSegment + "|" + colliderSegment;
         }
 
-        private static void LogRaycastFailure(TerrainAssetAdapter terrain, string sceneKey, string message)
+        private static void LogRaycastFailure(TerrainAssetAdapter terrain, string sceneKey, string colliderPath, string message)
         {
-            string key = BuildRaycastLogKey(terrain, sceneKey);
+            string key = BuildRaycastLogKey(terrain, sceneKey, colliderPath);
             if (loggedRaycastFailures.Contains(key))
             {
                 return;
             }
 
             string terrainName = terrain?.Name ?? "<none>";
-            string composedMessage = $"[Terrain Painter] {message} (Scene: {sceneKey}, Terrain: {terrainName})";
+            string colliderInfo = string.IsNullOrEmpty(colliderPath) ? "<auto>" : colliderPath;
+            string composedMessage = $"[Terrain Painter] {message} (Scene: {sceneKey}, Terrain: {terrainName}, Collider: {colliderInfo})";
             Debug.LogWarning(composedMessage);
             loggedRaycastFailures.Add(key);
         }
@@ -762,6 +953,19 @@ namespace DivineDragon.MapTools
             if (cache.mode != settings.mode)
             {
                 return false;
+            }
+
+            if (cache.autoSelection != settings.autoSelectCollider)
+            {
+                return false;
+            }
+
+            if (!cache.autoSelection)
+            {
+                if (!string.Equals(cache.requestedColliderPath ?? string.Empty, settings.colliderPath ?? string.Empty, StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
             }
 
             if (cache.width != terrain.m_Width || cache.height != terrain.m_Height)
@@ -842,10 +1046,15 @@ namespace DivineDragon.MapTools
             }
 
             Scene activeScene = SceneManager.GetActiveScene();
-            MeshCollider collider = GetSceneMeshCollider(activeScene);
+            string usedColliderPath;
+            MeshCollider collider = GetSceneMeshCollider(activeScene, settings, terrain, true, out usedColliderPath);
+
+            cache.autoSelection = settings?.autoSelectCollider ?? true;
+            cache.requestedColliderPath = settings?.colliderPath ?? string.Empty;
+            cache.colliderPath = usedColliderPath ?? string.Empty;
+
             if (collider == null)
             {
-                LogRaycastFailure(terrain, cache.sceneKey, "No MeshCollider found in the active scene. Using fixed height instead.");
                 return cache;
             }
 
@@ -890,14 +1099,14 @@ namespace DivineDragon.MapTools
             }
 
             bool anyHits = cache.anyCenterHits || cache.anyCornerHits;
-            string logKey = BuildRaycastLogKey(terrain, cache.sceneKey);
+            string logKey = BuildRaycastLogKey(terrain, cache.sceneKey, cache.colliderPath);
             if (anyHits)
             {
                 loggedRaycastFailures.Remove(logKey);
             }
             else
             {
-                LogRaycastFailure(terrain, cache.sceneKey, "Mesh raycasts hit nothing across the sampled terrain tiles. Using fixed height instead.");
+                LogRaycastFailure(terrain, cache.sceneKey, cache.colliderPath, "Mesh raycasts hit nothing across the sampled terrain tiles. Using fixed height instead.");
             }
 
             return cache;
@@ -1113,6 +1322,8 @@ namespace DivineDragon.MapTools
             public List<string> paths = new List<string>();
             public List<float> heights = new List<float>();
             public List<int> modes = new List<int>();
+            public List<int> autoColliderFlags = new List<int>();
+            public List<string> colliderPaths = new List<string>();
         }
         
         private void OnDisable()
@@ -1321,6 +1532,7 @@ namespace DivineDragon.MapTools
                         SetHeightModeForTerrain(selectedTerrain, newMode);
                         SceneView.RepaintAll();
                         DisposToolWindow.RequestRepaintAll(repaintScene: true);
+                        heightSettings = GetHeightSettings(selectedTerrain);
                     }
 
                     EditorGUI.BeginChangeCheck();
@@ -1334,6 +1546,86 @@ namespace DivineDragon.MapTools
                         SaveSettings();
                         SceneView.RepaintAll();
                         DisposToolWindow.RequestRepaintAll(repaintScene: true);
+                    }
+
+                    if (heightSettings.mode == TerrainHeightMode.RaycastMesh)
+                    {
+                        EditorGUI.indentLevel++;
+
+                        bool autoSelect = heightSettings.autoSelectCollider;
+                        EditorGUI.BeginChangeCheck();
+                        bool newAutoSelect = EditorGUILayout.Toggle(new GUIContent("Auto Select Collider", "Use the default scene collider (preferring meshes under Bmap) for raycast sampling."), autoSelect);
+                        if (EditorGUI.EndChangeCheck())
+                        {
+                            SetColliderSelectionForTerrain(selectedTerrain, newAutoSelect, heightSettings.colliderPath);
+                            heightSettings = GetHeightSettings(selectedTerrain);
+                            SceneView.RepaintAll();
+                            DisposToolWindow.RequestRepaintAll(repaintScene: true);
+                        }
+
+                        Scene currentScene = SceneManager.GetActiveScene();
+                        List<MeshCollider> sceneColliders = GetSceneColliders(currentScene);
+
+                        if (!heightSettings.autoSelectCollider)
+                        {
+                            if (sceneColliders.Count == 0)
+                            {
+                                EditorGUILayout.HelpBox("No MeshCollider found in the active scene. Raycast sampling will fall back to the fixed offset.", MessageType.Warning);
+                            }
+                            else
+                            {
+                                string[] colliderOptions = new string[sceneColliders.Count];
+                                string[] colliderPaths = new string[sceneColliders.Count];
+                                int currentIndex = -1;
+                                for (int i = 0; i < sceneColliders.Count; i++)
+                                {
+                                    string path = GetTransformPath(sceneColliders[i].transform);
+                                    colliderPaths[i] = path;
+                                    colliderOptions[i] = path;
+                                    if (currentIndex < 0 && string.Equals(path, heightSettings.colliderPath, StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        currentIndex = i;
+                                    }
+                                }
+
+                                if (currentIndex < 0)
+                                {
+                                    EditorGUILayout.HelpBox($"MeshCollider '{heightSettings.colliderPath}' is not present in the active scene. Auto selection will be used as a fallback while sampling.", MessageType.Warning);
+                                    currentIndex = 0;
+                                    string fallbackPath = colliderPaths[0];
+                                    if (!string.Equals(heightSettings.colliderPath, fallbackPath, StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        SetColliderSelectionForTerrain(selectedTerrain, false, fallbackPath);
+                                        heightSettings = GetHeightSettings(selectedTerrain);
+                                        SceneView.RepaintAll();
+                                        DisposToolWindow.RequestRepaintAll(repaintScene: true);
+                                    }
+                                }
+
+                                EditorGUI.BeginChangeCheck();
+                                int newIndex = EditorGUILayout.Popup(new GUIContent("Mesh Collider", "Choose which MeshCollider to project raycasts onto."), Mathf.Clamp(currentIndex, 0, colliderOptions.Length - 1), colliderOptions);
+                                if (EditorGUI.EndChangeCheck())
+                                {
+                                    string selectedPath = colliderPaths[Mathf.Clamp(newIndex, 0, colliderPaths.Length - 1)];
+                                    SetColliderSelectionForTerrain(selectedTerrain, false, selectedPath);
+                                    heightSettings = GetHeightSettings(selectedTerrain);
+                                    SceneView.RepaintAll();
+                                    DisposToolWindow.RequestRepaintAll(repaintScene: true);
+                                }
+                            }
+                        }
+                        else
+                        {
+                            MeshCollider defaultCollider = FindDefaultMeshCollider(currentScene);
+                            string info = defaultCollider != null ? GetTransformPath(defaultCollider.transform) : "<none>";
+                            EditorGUILayout.LabelField(new GUIContent("Auto Collider", "Collider currently selected for raycast sampling."), new GUIContent(info));
+                            if (defaultCollider == null)
+                            {
+                                EditorGUILayout.HelpBox("No MeshCollider found in the active scene. Raycast sampling will fall back to the fixed offset.", MessageType.Warning);
+                            }
+                        }
+
+                        EditorGUI.indentLevel--;
                     }
                 }
             }
@@ -2108,7 +2400,8 @@ namespace DivineDragon.MapTools
             bool useMeshRaycast = heightSettings != null && heightSettings.mode == TerrainHeightMode.RaycastMesh;
             if (useMeshRaycast)
             {
-                MeshCollider collider = GetSceneMeshCollider(SceneManager.GetActiveScene());
+                string hoverColliderPath;
+                MeshCollider collider = GetSceneMeshCollider(SceneManager.GetActiveScene(), heightSettings, selectedTerrain, false, out hoverColliderPath);
                 if (collider != null && collider.Raycast(ray, out RaycastHit meshHit, 10000f))
                 {
                     intersection = meshHit.point;
