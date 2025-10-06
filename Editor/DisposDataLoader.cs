@@ -41,6 +41,7 @@ namespace DivineDragon.MapTools
         {
             get
             {
+                RegisterXmlWatchers();
                 if (_instance == null)
                 {
                     _instance = new DisposDataLoader();
@@ -59,14 +60,16 @@ namespace DivineDragon.MapTools
         private string[] iconFilesNameLower = Array.Empty<string>(); // lowercase name for comparison
         private Dictionary<string, string> mpidNameMap = new Dictionary<string, string>();
         private Dictionary<string, string> mjidNameMap = new Dictionary<string, string>();
-        
+
+        private static bool watchersRegistered;
+
         private const string GameDataSharePath = "Assets/Share/Addressables/Patch/Patch3/GameData";
         private const string PERSON_XML_PATH = GameDataSharePath + "/Person.xml";
         private const string JOB_XML_PATH = GameDataSharePath + "/Job.xml";
         private const string ICON_FOLDER = "Assets/Editor/Unit Icons and the Last Engage";
         private const string PERSON_BUNDLE_TXT = "Assets/person.bytes.bundle.txt";
         private const string JOB_BUNDLE_TXT = "Assets/job.bytes.bundle.txt";
-        
+
         public void LoadAllData()
         {
             LoadPersonData();
@@ -76,7 +79,7 @@ namespace DivineDragon.MapTools
             BuildIconIndex();
             Debug.Log($"Loaded {personData.Count} persons and {jobData.Count} jobs");
         }
-        
+
         private void LoadPersonData()
         {
             if (!File.Exists(PERSON_XML_PATH))
@@ -84,14 +87,14 @@ namespace DivineDragon.MapTools
                 Debug.LogError($"Person.xml not found at {PERSON_XML_PATH}");
                 return;
             }
-            
+
             try
             {
                 XmlDocument doc = new XmlDocument();
                 doc.Load(PERSON_XML_PATH);
-                
+
                 XmlNodeList dataNodes = doc.SelectNodes("//Sheet[@Name='個人']/Data/Param");
-                
+
                 foreach (XmlNode node in dataNodes)
                 {
                     var person = new PersonInfo
@@ -257,14 +260,14 @@ namespace DivineDragon.MapTools
                 Debug.LogError($"Job.xml not found at {JOB_XML_PATH}");
                 return;
             }
-            
+
             try
             {
                 XmlDocument doc = new XmlDocument();
                 doc.Load(JOB_XML_PATH);
-                
+
                 XmlNodeList dataNodes = doc.SelectNodes("//Sheet[@Name='兵種']/Data/Param");
-                
+
                 foreach (XmlNode node in dataNodes)
                 {
                     var job = new JobInfo
@@ -581,6 +584,27 @@ namespace DivineDragon.MapTools
                 if (!string.IsNullOrEmpty(nice)) return nice;
             }
             return job.Jid ?? "Unknown";
+        }
+
+        private static void RegisterXmlWatchers()
+        {
+            if (watchersRegistered)
+            {
+                return;
+            }
+
+            XmlAssetTracker.Register(PERSON_XML_PATH, OnPersonOrJobXmlChanged);
+            XmlAssetTracker.Register(JOB_XML_PATH, OnPersonOrJobXmlChanged);
+            watchersRegistered = true;
+        }
+
+        private static void OnPersonOrJobXmlChanged()
+        {
+            if (_instance != null)
+            {
+                Debug.Log("Detected Person/Job XML change. Reloading data.");
+                _instance.ReloadData();
+            }
         }
     }
 }

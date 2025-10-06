@@ -1,8 +1,8 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using UnityEngine;
 using UnityEditor;
+using System.IO;
 
 namespace DivineDragon.MapTools
 {
@@ -15,6 +15,8 @@ namespace DivineDragon.MapTools
         private static string projectRootPath;
         private static string terrainXmlProjectPath;
         private static bool pathsInitialized;
+        private static bool watcherRegistered;
+        private static bool needsReload = true;
 
         internal static string TerrainXmlProjectFullPath
         {
@@ -25,8 +27,6 @@ namespace DivineDragon.MapTools
             }
         }
 
-        private static DateTime lastSourceWriteTimeUtc = DateTime.MinValue;
-        private static long lastSourceFileSize = -1;
         private static bool warnedMissingXml;
 
         [SerializeField]
@@ -69,6 +69,7 @@ namespace DivineDragon.MapTools
                 EditorUtility.SetDirty(this);
                 AssetDatabase.SaveAssets();
             }
+            needsReload = false;
         }
 
         private void RebuildLookup()
@@ -117,6 +118,11 @@ namespace DivineDragon.MapTools
                 return;
             }
 
+            if (!needsReload && terrainTypes != null && terrainTypes.Count > 0)
+            {
+                return;
+            }
+
             if (!File.Exists(terrainXmlProjectPath))
             {
                 if (!warnedMissingXml)
@@ -124,30 +130,21 @@ namespace DivineDragon.MapTools
                     Debug.LogWarning($"Terrain XML not found at '{terrainXmlProjectPath}'. Extract terrain.xml.bundle via the Chapter Dumper before opening terrain tools.");
                     warnedMissingXml = true;
                 }
+                needsReload = true;
                 return;
             }
 
             warnedMissingXml = false;
 
-            FileInfo fileInfo = new FileInfo(terrainXmlProjectPath);
-
-            bool hasExistingData = terrainTypes != null && terrainTypes.Count > 0;
-            if (hasExistingData && fileInfo.LastWriteTimeUtc == lastSourceWriteTimeUtc && fileInfo.Length == lastSourceFileSize)
-            {
-                return;
-            }
-
             if (!TerrainXmlLoader.TryLoadTerrainTypes(terrainXmlProjectPath, out List<TerrainType> parsedTerrains, out string error))
             {
                 Debug.LogError($"Failed to load terrain definitions: {error}");
+                needsReload = true;
                 return;
             }
 
             bool markDirty = AssetDatabase.Contains(this);
             Initialize(parsedTerrains, markDirty);
-
-            lastSourceWriteTimeUtc = fileInfo.LastWriteTimeUtc;
-            lastSourceFileSize = fileInfo.Length;
         }
 
         private static string ResolveProjectPath(string relativePath)
@@ -177,6 +174,12 @@ namespace DivineDragon.MapTools
                 : Path.Combine(projectRootPath, TerrainXmlAssetRelativePath).Replace("\\", "/");
 
             pathsInitialized = true;
+
+            if (!watcherRegistered && !string.IsNullOrEmpty(TerrainXmlAssetRelativePath))
+            {
+                XmlAssetTracker.Register(TerrainXmlAssetRelativePath, OnTerrainXmlChanged);
+                watcherRegistered = true;
+            }
         }
 
         public TerrainType GetTerrainType(string tid)
@@ -212,5 +215,16 @@ namespace DivineDragon.MapTools
         }
 
         public int Count => terrainTypes?.Count ?? 0;
+
+        private static void OnTerrainXmlChanged()
+        {
+            needsReload = true;
+            warnedMissingXml = false;
+
+            if (instance != null)
+            {
+                instance.EnsureLoadedFromTerrainXml();
+            }
+        }
     }
 }
