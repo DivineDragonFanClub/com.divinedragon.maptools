@@ -70,6 +70,12 @@ namespace DivineDragon.MapTools
             
             currentDocument = document;
             currentTerrain = terrain?.IsValid == true ? terrain : null;
+            Vector3 offset = TerrainPaintToolWindow.GetWorldOffset();
+            if (currentTerrain != null)
+            {
+                offset.y = TerrainPaintToolWindow.GetHeightOffsetForTerrain(currentTerrain);
+            }
+            worldOffset = offset;
             RefreshUnits();
         }
 
@@ -166,6 +172,13 @@ namespace DivineDragon.MapTools
         {
             if (currentDocument == null)
                 return;
+
+            Vector3 offset = TerrainPaintToolWindow.GetWorldOffset();
+            if (currentTerrain != null)
+            {
+                offset.y = TerrainPaintToolWindow.GetHeightOffsetForTerrain(currentTerrain);
+            }
+            worldOffset = offset;
             
             if (showGrid)
                 DrawGrid();

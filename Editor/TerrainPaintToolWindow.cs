@@ -186,6 +186,8 @@ namespace DivineDragon.MapTools
         private static Color gridColor = new Color(1f, 1f, 1f, 0.3f);
         private static float gridThickness = 1f;
         private static Vector3 worldOffset = Vector3.zero;
+        private static readonly Dictionary<string, float> terrainHeightOffsets = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+        private static bool terrainHeightPrefsLoaded = false;
         private static DisplayMode displayMode = DisplayMode.Both;
         // Label display is always Labels mode (no chips)
         private static float colorOpacity = 0.5f;
@@ -247,6 +249,7 @@ namespace DivineDragon.MapTools
         private const string PREFS_GRID_COLOR = PREFS_PREFIX + "GridColor";
         private const string PREFS_GRID_THICKNESS = PREFS_PREFIX + "GridThickness";
         private const string PREFS_WORLD_OFFSET = PREFS_PREFIX + "WorldOffset";
+        private const string PREFS_TERRAIN_HEIGHTS = PREFS_PREFIX + "TerrainHeights";
         private const string PREFS_SELECTED_TERRAIN = PREFS_PREFIX + "SelectedTerrain";
         private const string PREFS_DISPLAY_MODE = PREFS_PREFIX + "DisplayMode";
         private const string PREFS_COLOR_OPACITY = PREFS_PREFIX + "ColorOpacity";
@@ -385,6 +388,114 @@ namespace DivineDragon.MapTools
             SceneView.RepaintAll();
         }
 
+        internal static Vector3 GetWorldOffset()
+        {
+            return worldOffset;
+        }
+
+        internal static float GetHeightOffsetForTerrain(TerrainAssetAdapter terrain)
+        {
+            if (terrain?.Asset == null)
+            {
+                return 0f;
+            }
+
+            string path = AssetDatabase.GetAssetPath(terrain.Asset);
+            return GetHeightOffsetForPath(path);
+        }
+
+        private static float GetHeightOffsetForPath(string assetPath)
+        {
+            LoadTerrainHeightPreferencesIfNeeded();
+
+            if (!string.IsNullOrEmpty(assetPath) && terrainHeightOffsets.TryGetValue(assetPath, out float height))
+            {
+                return height;
+            }
+
+            return 0f;
+        }
+
+        private static void LoadTerrainHeightPreferencesIfNeeded()
+        {
+            if (terrainHeightPrefsLoaded)
+            {
+                return;
+            }
+
+            terrainHeightOffsets.Clear();
+            string json = EditorPrefs.GetString(PREFS_TERRAIN_HEIGHTS, string.Empty);
+            if (!string.IsNullOrEmpty(json))
+            {
+                try
+                {
+                    var prefs = new TerrainHeightPreferences();
+                    EditorJsonUtility.FromJsonOverwrite(json, prefs);
+                    if (prefs.paths != null && prefs.heights != null)
+                    {
+                        int count = Math.Min(prefs.paths.Count, prefs.heights.Count);
+                        for (int i = 0; i < count; i++)
+                        {
+                            string path = prefs.paths[i];
+                            if (!string.IsNullOrEmpty(path))
+                            {
+                                terrainHeightOffsets[path] = prefs.heights[i];
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning($"Failed to load terrain height preferences: {ex.Message}");
+                    terrainHeightOffsets.Clear();
+                }
+            }
+
+            terrainHeightPrefsLoaded = true;
+        }
+
+        private static void SaveTerrainHeightPreferences()
+        {
+            var prefs = new TerrainHeightPreferences();
+            foreach (var kvp in terrainHeightOffsets)
+            {
+                prefs.paths.Add(kvp.Key);
+                prefs.heights.Add(kvp.Value);
+            }
+
+            string json = EditorJsonUtility.ToJson(prefs);
+            EditorPrefs.SetString(PREFS_TERRAIN_HEIGHTS, json);
+        }
+
+        private static void ApplyTerrainHeightForSelection()
+        {
+            worldOffset.y = GetHeightOffsetForTerrain(selectedTerrain);
+        }
+
+        private static void StoreCurrentTerrainHeight()
+        {
+            if (selectedTerrain?.Asset == null)
+            {
+                return;
+            }
+
+            LoadTerrainHeightPreferencesIfNeeded();
+
+            string path = AssetDatabase.GetAssetPath(selectedTerrain.Asset);
+            if (!string.IsNullOrEmpty(path))
+            {
+                if (Mathf.Approximately(worldOffset.y, 0f))
+                {
+                    terrainHeightOffsets.Remove(path);
+                }
+                else
+                {
+                    terrainHeightOffsets[path] = worldOffset.y;
+                }
+                SaveTerrainHeightPreferences();
+            }
+        }
+
         private static Color GetBaseTerrainColor(string terrainId)
         {
             if (terrainDatabase == null || string.IsNullOrEmpty(terrainId))
@@ -473,6 +584,13 @@ namespace DivineDragon.MapTools
         private static readonly Vector3[] s_TileVerticesOverlay = new Vector3[4];
         private static GUIContent s_LabelContent = new GUIContent();
         private static System.Collections.Generic.Dictionary<string,float> labelAlphaStates = new System.Collections.Generic.Dictionary<string,float>();
+
+        [Serializable]
+        private class TerrainHeightPreferences
+        {
+            public List<string> paths = new List<string>();
+            public List<float> heights = new List<float>();
+        }
         
         private void OnDisable()
         {
@@ -488,6 +606,7 @@ namespace DivineDragon.MapTools
         
         private void LoadSettings()
         {
+            LoadTerrainHeightPreferencesIfNeeded();
             visualizationEnabled = EditorPrefs.GetBool(PREFS_ENABLED, true);
             showGridLines = EditorPrefs.GetBool(PREFS_SHOW_GRID, true);
             textSize = EditorPrefs.GetFloat(PREFS_TEXT_SIZE, 1.5f);
@@ -517,12 +636,15 @@ namespace DivineDragon.MapTools
                 s_LabelNodes.Clear();
                 labelAlphaStates.Clear();
             }
-            
+
+            ApplyTerrainHeightForSelection();
+
             // Relaxation: committed defaults (no prefs load)
         }
         
         private void SaveSettings()
         {
+            StoreCurrentTerrainHeight();
             EditorPrefs.SetBool(PREFS_ENABLED, visualizationEnabled);
             EditorPrefs.SetBool(PREFS_SHOW_GRID, showGridLines);
             EditorPrefs.SetFloat(PREFS_TEXT_SIZE, textSize);
@@ -616,6 +738,7 @@ namespace DivineDragon.MapTools
                 if (EditorGUI.EndChangeCheck())
                 {
                     selectedTerrain = TerrainAssetAdapter.FromObject(newAsset);
+                    ApplyTerrainHeightForSelection();
                     lastCachedTerrain = null;
                     InvalidateVirtualGrid(selectedTerrain);
                     TerrainRegionCache.ClearAll();
@@ -648,6 +771,7 @@ namespace DivineDragon.MapTools
                     if (EditorGUI.EndChangeCheck() && selectedIndex >= 0 && selectedIndex < availableTerrains.Count)
                     {
                         selectedTerrain = availableTerrains[selectedIndex];
+                        ApplyTerrainHeightForSelection();
                         SaveSettings();
                         SceneView.RepaintAll();
                     }
@@ -660,6 +784,16 @@ namespace DivineDragon.MapTools
                                            $"Origin: ({selectedTerrain.OriginX}, {selectedTerrain.OriginZ})\n" +
                                            $"Total Tiles: {selectedTerrain.Width * selectedTerrain.Height}", 
                                            MessageType.Info);
+
+                    EditorGUI.BeginChangeCheck();
+                    float newHeight = EditorGUILayout.FloatField(new GUIContent("Height Offset", "Vertical offset applied when rendering terrain overlays"), worldOffset.y);
+                    if (EditorGUI.EndChangeCheck())
+                    {
+                        worldOffset.y = newHeight;
+                        SaveSettings();
+                        SceneView.RepaintAll();
+                        DisposToolWindow.RequestRepaintAll(repaintScene: true);
+                    }
                 }
             }
             
