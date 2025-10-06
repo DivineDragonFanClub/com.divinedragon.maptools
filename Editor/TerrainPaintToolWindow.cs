@@ -188,6 +188,7 @@ namespace DivineDragon.MapTools
         private static Color textColor = Color.white;
         private static Color gridColor = new Color(1f, 1f, 1f, 0.3f);
         private static float gridThickness = 1f;
+        private static float currentGridThicknessWorld = 0.01f;
         private static Vector3 worldOffset = Vector3.zero;
 
         private enum TerrainHeightMode
@@ -258,7 +259,8 @@ namespace DivineDragon.MapTools
             public int height;
             public string colliderPath;
             public float fixedOffset;
-            public float thickness;
+            public float pixelThickness;
+            public float worldThickness;
             public Color color;
         }
 
@@ -267,6 +269,7 @@ namespace DivineDragon.MapTools
         private static readonly Dictionary<TerrainAssetAdapter, OverlayMeshData> overlayMeshCache = new Dictionary<TerrainAssetAdapter, OverlayMeshData>();
         private static readonly Dictionary<TerrainAssetAdapter, GridMeshData> gridMeshCache = new Dictionary<TerrainAssetAdapter, GridMeshData>();
         private static readonly Dictionary<string, MeshCollider> sceneColliderCache = new Dictionary<string, MeshCollider>(StringComparer.OrdinalIgnoreCase);
+        private static readonly List<TerrainAssetAdapter> meshCacheRemovalBuffer = new List<TerrainAssetAdapter>();
         private static Material overlayMaterial;
         private static readonly HashSet<string> loggedRaycastFailures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static readonly List<string> raycastLogRemovalBuffer = new List<string>();
@@ -569,6 +572,55 @@ namespace DivineDragon.MapTools
             gridMeshCache.Clear();
         }
 
+        private static void PruneMeshCaches(TerrainAssetAdapter activeTerrain)
+        {
+            if (activeTerrain == null)
+            {
+                DisposeOverlayMeshes();
+                DisposeGridMeshes();
+                return;
+            }
+
+            meshCacheRemovalBuffer.Clear();
+            foreach (var kv in overlayMeshCache)
+            {
+                if (!Equals(kv.Key, activeTerrain))
+                {
+                    if (kv.Value?.mesh != null)
+                    {
+                        UnityEngine.Object.DestroyImmediate(kv.Value.mesh);
+                    }
+                    meshCacheRemovalBuffer.Add(kv.Key);
+                }
+            }
+
+            foreach (var key in meshCacheRemovalBuffer)
+            {
+                overlayMeshCache.Remove(key);
+            }
+
+            meshCacheRemovalBuffer.Clear();
+
+            foreach (var kv in gridMeshCache)
+            {
+                if (!Equals(kv.Key, activeTerrain))
+                {
+                    if (kv.Value?.mesh != null)
+                    {
+                        UnityEngine.Object.DestroyImmediate(kv.Value.mesh);
+                    }
+                    meshCacheRemovalBuffer.Add(kv.Key);
+                }
+            }
+
+            foreach (var key in meshCacheRemovalBuffer)
+            {
+                gridMeshCache.Remove(key);
+            }
+
+            meshCacheRemovalBuffer.Clear();
+        }
+
         private static Mesh GetGridMesh(TerrainAssetAdapter terrain, TerrainVirtualGrid grid, TerrainHeightCache cache, TerrainHeightSettings settings)
         {
             if (terrain == null || grid == null)
@@ -589,6 +641,7 @@ namespace DivineDragon.MapTools
             string currentColliderPath = cache?.colliderPath ?? string.Empty;
             float currentFixedOffset = settings?.offset ?? 0f;
             float currentThickness = gridThickness;
+            float currentWorldThickness = Mathf.Max(0.0005f, currentGridThicknessWorld);
             Color currentColor = gridColor;
             TerrainHeightMode currentMode = settings?.mode ?? TerrainHeightMode.FixedOffset;
 
@@ -599,7 +652,8 @@ namespace DivineDragon.MapTools
                 needsRebuild |= data.heightMode != currentMode;
                 needsRebuild |= data.colliderPath != currentColliderPath;
                 needsRebuild |= data.sceneKey != currentSceneKey;
-                needsRebuild |= !Mathf.Approximately(data.thickness, currentThickness);
+                needsRebuild |= !Mathf.Approximately(data.pixelThickness, currentThickness);
+                needsRebuild |= !Mathf.Approximately(data.worldThickness, currentWorldThickness);
                 needsRebuild |= data.color != currentColor;
                 if (currentMode == TerrainHeightMode.FixedOffset)
                 {
@@ -613,13 +667,13 @@ namespace DivineDragon.MapTools
 
             if (needsRebuild)
             {
-                BuildGridMesh(data, terrain, grid, cache, settings);
+                BuildGridMesh(data, terrain, grid, cache, settings, currentWorldThickness);
             }
 
             return data.mesh;
         }
 
-        private static void BuildGridMesh(GridMeshData data, TerrainAssetAdapter terrain, TerrainVirtualGrid grid, TerrainHeightCache cache, TerrainHeightSettings settings)
+        private static void BuildGridMesh(GridMeshData data, TerrainAssetAdapter terrain, TerrainVirtualGrid grid, TerrainHeightCache cache, TerrainHeightSettings settings, float currentWorldThickness)
         {
             int width = terrain.m_Width;
             int height = terrain.m_Height;
@@ -641,7 +695,8 @@ namespace DivineDragon.MapTools
                 data.sceneKey = cache?.sceneKey ?? GetActiveSceneKey();
                 data.colliderPath = cache?.colliderPath ?? string.Empty;
                 data.fixedOffset = settings?.offset ?? 0f;
-                data.thickness = gridThickness;
+                data.pixelThickness = gridThickness;
+                data.worldThickness = currentWorldThickness;
                 data.color = gridColor;
                 return;
             }
@@ -649,7 +704,7 @@ namespace DivineDragon.MapTools
             float startX = terrain.m_X + worldOffset.x;
             float startZ = terrain.m_Z + worldOffset.z;
             const float lift = 0.01f;
-            float halfThickness = Mathf.Max(0.001f, gridThickness * (TILE_SIZE / 1000f)); // interpret slider pixels as thin world-space ribbons
+            float halfThickness = Mathf.Max(0.0005f, currentWorldThickness * 0.5f);
 
             int horizontalSegments = width * (height + 1);
             int verticalSegments = height * (width + 1);
@@ -725,7 +780,8 @@ namespace DivineDragon.MapTools
             data.heightCache = cache;
             data.heightMode = settings?.mode ?? TerrainHeightMode.FixedOffset;
             data.fixedOffset = settings?.offset ?? 0f;
-            data.thickness = gridThickness;
+            data.pixelThickness = gridThickness;
+            data.worldThickness = currentWorldThickness;
             data.color = gridColor;
         }
 
@@ -1881,6 +1937,8 @@ namespace DivineDragon.MapTools
                 labelAlphaStates.Clear();
             }
 
+            PruneMeshCaches(selectedTerrain);
+
             ApplyTerrainHeightForSelection();
 
             // Relaxation: committed defaults (no prefs load)
@@ -1982,6 +2040,7 @@ namespace DivineDragon.MapTools
                 if (EditorGUI.EndChangeCheck())
                 {
                     selectedTerrain = TerrainAssetAdapter.FromObject(newAsset);
+                    PruneMeshCaches(selectedTerrain);
                     ApplyTerrainHeightForSelection();
                     lastCachedTerrain = null;
                     InvalidateVirtualGrid(selectedTerrain);
@@ -2015,6 +2074,7 @@ namespace DivineDragon.MapTools
                     if (EditorGUI.EndChangeCheck() && selectedIndex >= 0 && selectedIndex < availableTerrains.Count)
                     {
                         selectedTerrain = availableTerrains[selectedIndex];
+                        PruneMeshCaches(selectedTerrain);
                         ApplyTerrainHeightForSelection();
                         SaveSettings();
                         SceneView.RepaintAll();
@@ -2446,10 +2506,52 @@ namespace DivineDragon.MapTools
             return Vector3.Distance(cameraPos, terrainCenter);
         }
 
+        private static float CalculateWorldThickness(SceneView sceneView, Vector3 worldPosition, float pixelThickness)
+        {
+            if (sceneView == null || sceneView.camera == null || pixelThickness <= 0f)
+            {
+                return 0f;
+            }
+
+            Camera camera = sceneView.camera;
+
+            if (camera.orthographic)
+            {
+                float pixelSize = (camera.orthographicSize * 2f) / Mathf.Max(1f, camera.pixelHeight);
+                return pixelThickness * pixelSize;
+            }
+
+            Vector3 guiPoint = HandleUtility.WorldToGUIPoint(worldPosition);
+            Vector3 guiOffset = guiPoint + new Vector3(pixelThickness, 0f, 0f);
+            Ray ray = HandleUtility.GUIPointToWorldRay(guiPoint);
+            Ray rayOffset = HandleUtility.GUIPointToWorldRay(guiOffset);
+            Plane plane = new Plane(Vector3.up, worldPosition);
+            if (plane.Raycast(ray, out float enter) && plane.Raycast(rayOffset, out float enterOffset))
+            {
+                Vector3 p0 = ray.GetPoint(enter);
+                Vector3 p1 = rayOffset.GetPoint(enterOffset);
+                float projected = (p1 - p0).magnitude;
+                if (projected > 1e-6f)
+                {
+                    return projected;
+                }
+            }
+
+            float distance = Vector3.Distance(camera.transform.position, worldPosition);
+            float fov = camera.fieldOfView * Mathf.Deg2Rad;
+            float pixelWorldSize = 2f * distance * Mathf.Tan(fov * 0.5f) / Mathf.Max(1f, camera.pixelHeight);
+            return pixelThickness * pixelWorldSize;
+        }
+
         private static void OnSceneGUI(SceneView sceneView)
         {
             if (!visualizationEnabled || selectedTerrain == null)
+            {
+                PruneMeshCaches(selectedTerrain);
                 return;
+            }
+
+            PruneMeshCaches(selectedTerrain);
 
             TerrainVirtualGrid currentGrid = GetVirtualGrid(selectedTerrain);
             if (currentGrid == null)
@@ -2473,6 +2575,8 @@ namespace DivineDragon.MapTools
             float terrainCenterX = startX + (width * TILE_SIZE) / 2f;
             float terrainCenterZ = startZ + (height * TILE_SIZE) / 2f;
             float cameraDistance = GetCameraDistance(sceneView, terrainCenterX, terrainCenterZ, centerHeight);
+            Vector3 gridReferencePosition = new Vector3(terrainCenterX, centerHeight + 0.02f, terrainCenterZ);
+            currentGridThicknessWorld = showGridLines ? Mathf.Max(0.0005f, CalculateWorldThickness(sceneView, gridReferencePosition, gridThickness)) : 0f;
             
             float currentTime = (float)EditorApplication.timeSinceStartup;
             float deltaTime = Mathf.Min(currentTime - lastFrameTime, 0.1f);
