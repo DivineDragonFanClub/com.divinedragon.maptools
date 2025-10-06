@@ -1568,50 +1568,78 @@ namespace DivineDragon.MapTools
 
                         if (!heightSettings.autoSelectCollider)
                         {
-                            if (sceneColliders.Count == 0)
-                            {
-                                EditorGUILayout.HelpBox("No MeshCollider found in the active scene. Raycast sampling will fall back to the fixed offset.", MessageType.Warning);
-                            }
-                            else
-                            {
-                                string[] colliderOptions = new string[sceneColliders.Count];
-                                string[] colliderPaths = new string[sceneColliders.Count];
-                                int currentIndex = -1;
-                                for (int i = 0; i < sceneColliders.Count; i++)
-                                {
-                                    string path = GetTransformPath(sceneColliders[i].transform);
-                                    colliderPaths[i] = path;
-                                    colliderOptions[i] = path;
-                                    if (currentIndex < 0 && string.Equals(path, heightSettings.colliderPath, StringComparison.OrdinalIgnoreCase))
-                                    {
-                                        currentIndex = i;
-                                    }
-                                }
+                            MeshCollider currentManualCollider = !string.IsNullOrEmpty(heightSettings.colliderPath)
+                                ? FindMeshColliderByPath(currentScene, heightSettings.colliderPath)
+                                : null;
+                            GameObject currentColliderObject = currentManualCollider != null ? currentManualCollider.gameObject : null;
 
-                                if (currentIndex < 0)
-                                {
-                                    EditorGUILayout.HelpBox($"MeshCollider '{heightSettings.colliderPath}' is not present in the active scene. Auto selection will be used as a fallback while sampling.", MessageType.Warning);
-                                    currentIndex = 0;
-                                    string fallbackPath = colliderPaths[0];
-                                    if (!string.Equals(heightSettings.colliderPath, fallbackPath, StringComparison.OrdinalIgnoreCase))
-                                    {
-                                        SetColliderSelectionForTerrain(selectedTerrain, false, fallbackPath);
-                                        heightSettings = GetHeightSettings(selectedTerrain);
-                                        SceneView.RepaintAll();
-                                        DisposToolWindow.RequestRepaintAll(repaintScene: true);
-                                    }
-                                }
+                            List<(string message, MessageType type)> colliderMessages = new List<(string, MessageType)>();
 
-                                EditorGUI.BeginChangeCheck();
-                                int newIndex = EditorGUILayout.Popup(new GUIContent("Mesh Collider", "Choose which MeshCollider to project raycasts onto."), Mathf.Clamp(currentIndex, 0, colliderOptions.Length - 1), colliderOptions);
-                                if (EditorGUI.EndChangeCheck())
+                            EditorGUI.BeginChangeCheck();
+                            GameObject selectedColliderObject = (GameObject)EditorGUILayout.ObjectField(
+                                new GUIContent("Mesh Collider Object", "Select a GameObject with a MeshCollider in the active scene."),
+                                currentColliderObject,
+                                typeof(GameObject),
+                                true);
+                            if (EditorGUI.EndChangeCheck())
+                            {
+                                if (selectedColliderObject == null)
                                 {
-                                    string selectedPath = colliderPaths[Mathf.Clamp(newIndex, 0, colliderPaths.Length - 1)];
-                                    SetColliderSelectionForTerrain(selectedTerrain, false, selectedPath);
+                                    SetColliderSelectionForTerrain(selectedTerrain, false, string.Empty);
                                     heightSettings = GetHeightSettings(selectedTerrain);
                                     SceneView.RepaintAll();
                                     DisposToolWindow.RequestRepaintAll(repaintScene: true);
+                                    currentManualCollider = null;
+                                    currentColliderObject = null;
                                 }
+                                else if (selectedColliderObject.scene != currentScene)
+                                {
+                                    colliderMessages.Add(("Selected GameObject must belong to the active scene.", MessageType.Error));
+                                }
+                                else
+                                {
+                                    MeshCollider selectedCollider = selectedColliderObject.GetComponent<MeshCollider>();
+                                    if (selectedCollider == null || selectedCollider.sharedMesh == null)
+                                    {
+                                        colliderMessages.Add(("Selected GameObject must have a MeshCollider with a valid mesh.", MessageType.Error));
+                                    }
+                                    else
+                                    {
+                                        string selectedPath = GetTransformPath(selectedCollider.transform);
+                                        SetColliderSelectionForTerrain(selectedTerrain, false, selectedPath);
+                                        heightSettings = GetHeightSettings(selectedTerrain);
+                                        SceneView.RepaintAll();
+                                        DisposToolWindow.RequestRepaintAll(repaintScene: true);
+                                        currentManualCollider = selectedCollider;
+                                        currentColliderObject = selectedCollider.gameObject;
+                                    }
+                                }
+                            }
+
+                            if (!string.IsNullOrEmpty(heightSettings.colliderPath))
+                            {
+                                if (currentManualCollider == null)
+                                {
+                                    colliderMessages.Add(($"MeshCollider '{heightSettings.colliderPath}' is not present in the active scene. Auto selection will be used as a fallback while sampling.", MessageType.Warning));
+                                }
+                                else
+                                {
+                                    EditorGUILayout.LabelField(new GUIContent("Resolved Collider", "Collider currently used for raycast sampling."), new GUIContent(GetTransformPath(currentManualCollider.transform)));
+                                }
+                            }
+                            else
+                            {
+                                colliderMessages.Add(("No collider selected. Auto selection will be used as a fallback while sampling.", MessageType.Info));
+                            }
+
+                            if (sceneColliders.Count == 0)
+                            {
+                                colliderMessages.Add(("No MeshCollider found in the active scene. Raycast sampling will fall back to the fixed offset.", MessageType.Warning));
+                            }
+
+                            foreach (var message in colliderMessages)
+                            {
+                                EditorGUILayout.HelpBox(message.message, message.type);
                             }
                         }
                         else
