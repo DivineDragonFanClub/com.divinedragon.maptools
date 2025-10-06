@@ -32,7 +32,51 @@ namespace DivineDragon.MapTools
         private float TerrainStartZ => TerrainOriginZ + worldOffset.z;
         private int TerrainWidth => currentTerrain?.Width ?? 0;
         private int TerrainHeight => currentTerrain?.Height ?? 0;
-        
+
+        private float GetTileHeight(int tileX, int tileZ)
+        {
+            if (currentTerrain == null)
+            {
+                return worldOffset.y;
+            }
+
+            return TerrainPaintToolWindow.GetTileWorldHeight(currentTerrain, tileX, tileZ);
+        }
+
+        private void GetTileCornerWorldPositions(int tileX, int tileZ, float lift, out Vector3 bl, out Vector3 br, out Vector3 tr, out Vector3 tl)
+        {
+            float baseX = TerrainStartX + tileX * TILE_SIZE;
+            float baseZ = TerrainStartZ + tileZ * TILE_SIZE;
+
+            if (currentTerrain == null)
+            {
+                float y = worldOffset.y + lift;
+                bl = new Vector3(baseX, y, baseZ);
+                br = new Vector3(baseX + TILE_SIZE, y, baseZ);
+                tr = new Vector3(baseX + TILE_SIZE, y, baseZ + TILE_SIZE);
+                tl = new Vector3(baseX, y, baseZ + TILE_SIZE);
+                return;
+            }
+
+            float h00 = TerrainPaintToolWindow.GetTileCornerWorldHeight(currentTerrain, tileX, tileZ) + lift;
+            float h10 = TerrainPaintToolWindow.GetTileCornerWorldHeight(currentTerrain, tileX + 1, tileZ) + lift;
+            float h11 = TerrainPaintToolWindow.GetTileCornerWorldHeight(currentTerrain, tileX + 1, tileZ + 1) + lift;
+            float h01 = TerrainPaintToolWindow.GetTileCornerWorldHeight(currentTerrain, tileX, tileZ + 1) + lift;
+
+            bl = new Vector3(baseX, h00, baseZ);
+            br = new Vector3(baseX + TILE_SIZE, h10, baseZ);
+            tr = new Vector3(baseX + TILE_SIZE, h11, baseZ + TILE_SIZE);
+            tl = new Vector3(baseX, h01, baseZ + TILE_SIZE);
+        }
+
+        private Vector3 GetTileCenterWorld(int tileX, int tileZ, float lift = 0f)
+        {
+            float worldX = TerrainStartX + tileX * TILE_SIZE + TILE_SIZE * 0.5f;
+            float worldZ = TerrainStartZ + tileZ * TILE_SIZE + TILE_SIZE * 0.5f;
+            float height = GetTileHeight(tileX, tileZ) + lift;
+            return new Vector3(worldX, height, worldZ);
+        }
+
         public DisposEntry SelectedEntry
         {
             get => selectedEntry;
@@ -88,7 +132,8 @@ namespace DivineDragon.MapTools
             float startZ = TerrainOriginZ;
             float worldX = startX + entry.DisposX * TILE_SIZE + TILE_SIZE * 0.5f;
             float worldZ = startZ + entry.DisposY * TILE_SIZE + TILE_SIZE * 0.5f;
-            Vector3 center = new Vector3(worldX, worldOffset.y, worldZ);
+            float height = GetTileHeight(entry.DisposX, entry.DisposY);
+            Vector3 center = new Vector3(worldX, height, worldZ);
             bounds = new Bounds(center, new Vector3(TILE_SIZE * 2f, TILE_SIZE * 2f, TILE_SIZE * 2f));
             return true;
         }
@@ -296,36 +341,53 @@ namespace DivineDragon.MapTools
             int height = TerrainHeight;
             float startX = TerrainStartX;
             float startZ = TerrainStartZ;
-            float y = worldOffset.y;
-            
             Color gridColor = new Color(1f, 1f, 1f, 0.3f);
             Handles.color = gridColor;
-            
-            // Draw horizontal lines
-            for (int row = 0; row <= height; row++)
+
+            if (width > 0 && height > 0)
             {
-                Vector3 start = new Vector3(startX, y + 0.01f, startZ + row * TILE_SIZE);
-                Vector3 end = new Vector3(startX + width * TILE_SIZE, y + 0.01f, startZ + row * TILE_SIZE);
-                Handles.DrawLine(start, end, 1f);
-            }
-            
-            // Draw vertical lines
-            for (int col = 0; col <= width; col++)
-            {
-                Vector3 start = new Vector3(startX + col * TILE_SIZE, y + 0.01f, startZ);
-                Vector3 end = new Vector3(startX + col * TILE_SIZE, y + 0.01f, startZ + height * TILE_SIZE);
-                Handles.DrawLine(start, end, 1f);
+                float lift = 0.01f;
+
+                for (int row = 0; row <= height; row++)
+                {
+                    float z = startZ + row * TILE_SIZE;
+                    for (int col = 0; col < width; col++)
+                    {
+                        float x0 = startX + col * TILE_SIZE;
+                        float x1 = startX + (col + 1) * TILE_SIZE;
+                        float hStart = TerrainPaintToolWindow.GetTileCornerWorldHeight(currentTerrain, col, row) + lift;
+                        float hEnd = TerrainPaintToolWindow.GetTileCornerWorldHeight(currentTerrain, col + 1, row) + lift;
+                        Vector3 start = new Vector3(x0, hStart, z);
+                        Vector3 end = new Vector3(x1, hEnd, z);
+                        Handles.DrawLine(start, end, 1f);
+                    }
+                }
+
+                for (int col = 0; col <= width; col++)
+                {
+                    float x = startX + col * TILE_SIZE;
+                    for (int row = 0; row < height; row++)
+                    {
+                        float z0 = startZ + row * TILE_SIZE;
+                        float z1 = startZ + (row + 1) * TILE_SIZE;
+                        float hStart = TerrainPaintToolWindow.GetTileCornerWorldHeight(currentTerrain, col, row) + lift;
+                        float hEnd = TerrainPaintToolWindow.GetTileCornerWorldHeight(currentTerrain, col, row + 1) + lift;
+                        Vector3 start = new Vector3(x, hStart, z0);
+                        Vector3 end = new Vector3(x, hEnd, z1);
+                        Handles.DrawLine(start, end, 1f);
+                    }
+                }
             }
 
-            // Highlight a selected empty tile if any
             if (hasSelectedTile)
             {
+                float tileHeight = GetTileHeight(selectedTile.x, selectedTile.y);
                 float tileX = startX + selectedTile.x * TILE_SIZE;
                 float tileZ = startZ + selectedTile.y * TILE_SIZE;
-                Vector2 p0 = HandleUtility.WorldToGUIPoint(new Vector3(tileX, y, tileZ));
-                Vector2 p1 = HandleUtility.WorldToGUIPoint(new Vector3(tileX + TILE_SIZE, y, tileZ));
-                Vector2 p2 = HandleUtility.WorldToGUIPoint(new Vector3(tileX + TILE_SIZE, y, tileZ + TILE_SIZE));
-                Vector2 p3 = HandleUtility.WorldToGUIPoint(new Vector3(tileX, y, tileZ + TILE_SIZE));
+                Vector2 p0 = HandleUtility.WorldToGUIPoint(new Vector3(tileX, tileHeight, tileZ));
+                Vector2 p1 = HandleUtility.WorldToGUIPoint(new Vector3(tileX + TILE_SIZE, tileHeight, tileZ));
+                Vector2 p2 = HandleUtility.WorldToGUIPoint(new Vector3(tileX + TILE_SIZE, tileHeight, tileZ + TILE_SIZE));
+                Vector2 p3 = HandleUtility.WorldToGUIPoint(new Vector3(tileX, tileHeight, tileZ + TILE_SIZE));
                 float minX = Mathf.Min(Mathf.Min(p0.x, p1.x), Mathf.Min(p2.x, p3.x));
                 float maxX = Mathf.Max(Mathf.Max(p0.x, p1.x), Mathf.Max(p2.x, p3.x));
                 float minY = Mathf.Min(Mathf.Min(p0.y, p1.y), Mathf.Min(p2.y, p3.y));
@@ -347,7 +409,8 @@ namespace DivineDragon.MapTools
             float startZ = TerrainOriginZ;
             float worldX = startX + entry.DisposX * TILE_SIZE + TILE_SIZE * 0.5f;
             float worldZ = startZ + entry.DisposY * TILE_SIZE + TILE_SIZE * 0.5f;
-            Vector3 worldPos = new Vector3(worldX, worldOffset.y + 0.02f, worldZ);
+            float tileHeight = GetTileHeight(entry.DisposX, entry.DisposY);
+            Vector3 worldPos = new Vector3(worldX, tileHeight + 0.02f, worldZ);
 
             // Screen-space icon overlay sized to tile
             if (showIcons)
@@ -459,7 +522,7 @@ namespace DivineDragon.MapTools
             if (currentTerrain == null || entry == null) return;
             float startX = TerrainStartX;
             float startZ = TerrainStartZ;
-            float y = worldOffset.y + 0.02f;
+            float y = GetTileHeight(entry.DisposX, entry.DisposY) + 0.02f;
 
             float tileX = startX + entry.DisposX * TILE_SIZE;
             float tileZ = startZ + entry.DisposY * TILE_SIZE;
@@ -487,7 +550,7 @@ namespace DivineDragon.MapTools
             if (currentTerrain == null || entry == null) return;
             float startX = TerrainStartX;
             float startZ = TerrainStartZ;
-            float y = worldOffset.y + 0.02f;
+            float y = GetTileHeight(entry.DisposX, entry.DisposY) + 0.02f;
 
             float tileX = startX + entry.DisposX * TILE_SIZE;
             float tileZ = startZ + entry.DisposY * TILE_SIZE;
@@ -599,10 +662,6 @@ namespace DivineDragon.MapTools
             var result = new List<DisposEntry>();
             if (currentTerrain == null || currentDocument == null) return result;
 
-            float startX = TerrainStartX;
-            float startZ = TerrainStartZ;
-            float y = worldOffset.y + 0.02f;
-
             foreach (var group in currentDocument.Groups)
             {
                 if (!group.IsVisible) continue;
@@ -611,12 +670,11 @@ namespace DivineDragon.MapTools
                     if (entry.IsGroupHeader) continue;
                     if (!IsEntryVisible(entry)) continue;
 
-                    float tileX = startX + entry.DisposX * TILE_SIZE;
-                    float tileZ = startZ + entry.DisposY * TILE_SIZE;
-                    Vector2 p0 = HandleUtility.WorldToGUIPoint(new Vector3(tileX, y, tileZ));
-                    Vector2 p1 = HandleUtility.WorldToGUIPoint(new Vector3(tileX + TILE_SIZE, y, tileZ));
-                    Vector2 p2 = HandleUtility.WorldToGUIPoint(new Vector3(tileX + TILE_SIZE, y, tileZ + TILE_SIZE));
-                    Vector2 p3 = HandleUtility.WorldToGUIPoint(new Vector3(tileX, y, tileZ + TILE_SIZE));
+                    GetTileCornerWorldPositions(entry.DisposX, entry.DisposY, 0.02f, out Vector3 blW, out Vector3 brW, out Vector3 trW, out Vector3 tlW);
+                    Vector2 p0 = HandleUtility.WorldToGUIPoint(blW);
+                    Vector2 p1 = HandleUtility.WorldToGUIPoint(brW);
+                    Vector2 p2 = HandleUtility.WorldToGUIPoint(trW);
+                    Vector2 p3 = HandleUtility.WorldToGUIPoint(tlW);
                     float minX = Mathf.Min(Mathf.Min(p0.x, p1.x), Mathf.Min(p2.x, p3.x));
                     float maxX = Mathf.Max(Mathf.Max(p0.x, p1.x), Mathf.Max(p2.x, p3.x));
                     float minY = Mathf.Min(Mathf.Min(p0.y, p1.y), Mathf.Min(p2.y, p3.y));
@@ -631,23 +689,16 @@ namespace DivineDragon.MapTools
         private void DrawStackBadge(Vector2Int tile, int count)
         {
             if (currentTerrain == null || count <= 1) return;
-            float startX = TerrainStartX;
-            float startZ = TerrainStartZ;
-            float y = worldOffset.y + 0.02f;
-
             // Compute the same icon rect used by unit icons for this tile
-            float tileX = startX + tile.x * TILE_SIZE;
-            float tileZ = startZ + tile.y * TILE_SIZE;
-            Vector3 blW = new Vector3(tileX, y, tileZ);
-            Vector3 brW = new Vector3(tileX + TILE_SIZE, y, tileZ);
-            Vector3 tlW = new Vector3(tileX, y, tileZ + TILE_SIZE);
+            GetTileCornerWorldPositions(tile.x, tile.y, 0.02f, out Vector3 blW, out Vector3 brW, out Vector3 trW, out Vector3 tlW);
             Vector2 bl = HandleUtility.WorldToGUIPoint(blW);
             Vector2 br = HandleUtility.WorldToGUIPoint(brW);
             Vector2 tl = HandleUtility.WorldToGUIPoint(tlW);
             float tileWidthPx = (br - bl).magnitude;
             float tileHeightPx = (tl - bl).magnitude;
             float sizePx = Mathf.Min(tileWidthPx, tileHeightPx) * ICON_TILE_SCALE;
-            Vector2 center = HandleUtility.WorldToGUIPoint(new Vector3(tileX + TILE_SIZE * 0.5f, y, tileZ + TILE_SIZE * 0.5f));
+            Vector3 centerWorld = (blW + brW + trW + tlW) * 0.25f;
+            Vector2 center = HandleUtility.WorldToGUIPoint(centerWorld);
             Rect iconRect = new Rect(center.x - sizePx * 0.5f, center.y - sizePx * 0.5f, sizePx, sizePx);
 
             string text = "x" + count;
@@ -691,20 +742,17 @@ namespace DivineDragon.MapTools
         public Rect GetStackBadgeRect(Vector2Int tile, int count = 0)
         {
             if (currentTerrain == null) return Rect.zero;
-            float startX = TerrainStartX;
-            float startZ = TerrainStartZ;
-            float y = worldOffset.y + 0.02f;
-            float tileX = startX + tile.x * TILE_SIZE;
-            float tileZ = startZ + tile.y * TILE_SIZE;
+            GetTileCornerWorldPositions(tile.x, tile.y, 0.02f, out Vector3 blW, out Vector3 brW, out Vector3 trW, out Vector3 tlW);
 
             // Recompute icon rect for hit testing
-            Vector2 bl = HandleUtility.WorldToGUIPoint(new Vector3(tileX, y, tileZ));
-            Vector2 br = HandleUtility.WorldToGUIPoint(new Vector3(tileX + TILE_SIZE, y, tileZ));
-            Vector2 tl = HandleUtility.WorldToGUIPoint(new Vector3(tileX, y, tileZ + TILE_SIZE));
+            Vector2 bl = HandleUtility.WorldToGUIPoint(blW);
+            Vector2 br = HandleUtility.WorldToGUIPoint(brW);
+            Vector2 tl = HandleUtility.WorldToGUIPoint(tlW);
             float tileWidthPx = (br - bl).magnitude;
             float tileHeightPx = (tl - bl).magnitude;
             float sizePx = Mathf.Min(tileWidthPx, tileHeightPx) * ICON_TILE_SCALE;
-            Vector2 center = HandleUtility.WorldToGUIPoint(new Vector3(tileX + TILE_SIZE * 0.5f, y, tileZ + TILE_SIZE * 0.5f));
+            Vector3 centerWorld = (blW + brW + trW + tlW) * 0.25f;
+            Vector2 center = HandleUtility.WorldToGUIPoint(centerWorld);
             Rect iconRect = new Rect(center.x - sizePx * 0.5f, center.y - sizePx * 0.5f, sizePx, sizePx);
 
             string text = "x" + (count > 0 ? count : 99);
@@ -754,13 +802,15 @@ namespace DivineDragon.MapTools
         {
             float startX = TerrainStartX;
             float startZ = TerrainStartZ;
-            float y = worldOffset.y + 0.02f;
-            Vector2 p0 = HandleUtility.WorldToGUIPoint(new Vector3(startX + tile.x * TILE_SIZE, y, startZ + tile.y * TILE_SIZE));
-            Vector2 p2 = HandleUtility.WorldToGUIPoint(new Vector3(startX + (tile.x + 1) * TILE_SIZE, y, startZ + (tile.y + 1) * TILE_SIZE));
-            float minX = Mathf.Min(p0.x, p2.x);
-            float maxX = Mathf.Max(p0.x, p2.x);
-            float minY = Mathf.Min(p0.y, p2.y);
-            float maxY = Mathf.Max(p0.y, p2.y);
+            GetTileCornerWorldPositions(tile.x, tile.y, 0.02f, out Vector3 blW, out Vector3 brW, out Vector3 trW, out Vector3 tlW);
+            Vector2 p0 = HandleUtility.WorldToGUIPoint(blW);
+            Vector2 p1 = HandleUtility.WorldToGUIPoint(brW);
+            Vector2 p2 = HandleUtility.WorldToGUIPoint(trW);
+            Vector2 p3 = HandleUtility.WorldToGUIPoint(tlW);
+            float minX = Mathf.Min(Mathf.Min(p0.x, p1.x), Mathf.Min(p2.x, p3.x));
+            float maxX = Mathf.Max(Mathf.Max(p0.x, p1.x), Mathf.Max(p2.x, p3.x));
+            float minY = Mathf.Min(Mathf.Min(p0.y, p1.y), Mathf.Min(p2.y, p3.y));
+            float maxY = Mathf.Max(Mathf.Max(p0.y, p1.y), Mathf.Max(p2.y, p3.y));
             return new Rect(minX, minY, maxX - minX, maxY - minY);
         }
         
@@ -882,7 +932,6 @@ namespace DivineDragon.MapTools
 
             float startX = TerrainStartX;
             float startZ = TerrainStartZ;
-            float y = worldOffset.y + 0.02f;
 
             DisposEntry best = null;
             float bestDist = float.MaxValue;
@@ -896,10 +945,11 @@ namespace DivineDragon.MapTools
 
                     float tileX = startX + entry.DisposX * TILE_SIZE;
                     float tileZ = startZ + entry.DisposY * TILE_SIZE;
-                    Vector2 p0 = HandleUtility.WorldToGUIPoint(new Vector3(tileX, y, tileZ));
-                    Vector2 p1 = HandleUtility.WorldToGUIPoint(new Vector3(tileX + TILE_SIZE, y, tileZ));
-                    Vector2 p2 = HandleUtility.WorldToGUIPoint(new Vector3(tileX + TILE_SIZE, y, tileZ + TILE_SIZE));
-                    Vector2 p3 = HandleUtility.WorldToGUIPoint(new Vector3(tileX, y, tileZ + TILE_SIZE));
+                    float tileHeight = GetTileHeight(entry.DisposX, entry.DisposY) + 0.02f;
+                    Vector2 p0 = HandleUtility.WorldToGUIPoint(new Vector3(tileX, tileHeight, tileZ));
+                    Vector2 p1 = HandleUtility.WorldToGUIPoint(new Vector3(tileX + TILE_SIZE, tileHeight, tileZ));
+                    Vector2 p2 = HandleUtility.WorldToGUIPoint(new Vector3(tileX + TILE_SIZE, tileHeight, tileZ + TILE_SIZE));
+                    Vector2 p3 = HandleUtility.WorldToGUIPoint(new Vector3(tileX, tileHeight, tileZ + TILE_SIZE));
                     float minX = Mathf.Min(Mathf.Min(p0.x, p1.x), Mathf.Min(p2.x, p3.x));
                     float maxX = Mathf.Max(Mathf.Max(p0.x, p1.x), Mathf.Max(p2.x, p3.x));
                     float minY = Mathf.Min(Mathf.Min(p0.y, p1.y), Mathf.Min(p2.y, p3.y));
@@ -909,7 +959,7 @@ namespace DivineDragon.MapTools
                     if (r.Contains(mouseGui))
                     {
                         // Prefer the closest tile center in screen space when overlapping
-                        Vector2 center = HandleUtility.WorldToGUIPoint(new Vector3(tileX + TILE_SIZE * 0.5f, y, tileZ + TILE_SIZE * 0.5f));
+                        Vector2 center = HandleUtility.WorldToGUIPoint(new Vector3(tileX + TILE_SIZE * 0.5f, tileHeight, tileZ + TILE_SIZE * 0.5f));
                         float d = (center - mouseGui).sqrMagnitude;
                         if (d < bestDist)
                         {
@@ -1002,16 +1052,8 @@ namespace DivineDragon.MapTools
             if (currentTerrain == null) return;
             float startX = TerrainStartX;
             float startZ = TerrainStartZ;
-            float y = worldOffset.y + 0.02f;
-            float tileX = startX + entry.DisposX * TILE_SIZE;
-            float tileZ = startZ + entry.DisposY * TILE_SIZE;
-            Vector3[] verts = new Vector3[]
-            {
-                new Vector3(tileX, y, tileZ),
-                new Vector3(tileX + TILE_SIZE, y, tileZ),
-                new Vector3(tileX + TILE_SIZE, y, tileZ + TILE_SIZE),
-                new Vector3(tileX, y, tileZ + TILE_SIZE)
-            };
+            GetTileCornerWorldPositions(entry.DisposX, entry.DisposY, 0.02f, out Vector3 bl, out Vector3 br, out Vector3 tr, out Vector3 tl);
+            Vector3[] verts = new Vector3[] { bl, br, tr, tl };
             Color c = DisposDataLoader.Instance.GetForceColor(entry.Force);
             Handles.DrawSolidRectangleWithOutline(verts, c, Color.black);
         }

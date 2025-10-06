@@ -2,7 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace DivineDragon.MapTools
 {
@@ -186,7 +188,40 @@ namespace DivineDragon.MapTools
         private static Color gridColor = new Color(1f, 1f, 1f, 0.3f);
         private static float gridThickness = 1f;
         private static Vector3 worldOffset = Vector3.zero;
-        private static readonly Dictionary<string, float> terrainHeightOffsets = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+
+        private enum TerrainHeightMode
+        {
+            FixedOffset,
+            RaycastMesh
+        }
+
+        private class TerrainHeightSettings
+        {
+            public float offset;
+            public TerrainHeightMode mode;
+        }
+
+        private class TerrainHeightCache
+        {
+            public TerrainHeightMode mode;
+            public int width;
+            public int height;
+            public float originX;
+            public float originZ;
+            public float offsetX;
+            public float offsetZ;
+            public string sceneKey;
+            public float[] centerSamples;
+            public float[] cornerSamples;
+            public bool anyCenterHits;
+            public bool anyCornerHits;
+        }
+
+        private static readonly Dictionary<string, TerrainHeightSettings> terrainHeightSettings = new Dictionary<string, TerrainHeightSettings>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<TerrainAssetAdapter, TerrainHeightCache> terrainHeightCache = new Dictionary<TerrainAssetAdapter, TerrainHeightCache>();
+        private static readonly Dictionary<string, MeshCollider> sceneColliderCache = new Dictionary<string, MeshCollider>(StringComparer.OrdinalIgnoreCase);
+        private static readonly HashSet<string> loggedRaycastFailures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private static readonly List<string> raycastLogRemovalBuffer = new List<string>();
         private static bool terrainHeightPrefsLoaded = false;
         private static DisplayMode displayMode = DisplayMode.Both;
         // Label display is always Labels mode (no chips)
@@ -288,6 +323,8 @@ namespace DivineDragon.MapTools
             SceneView.duringSceneGui += OnSceneGUI;
             Undo.undoRedoPerformed -= OnUndoRedo;
             Undo.undoRedoPerformed += OnUndoRedo;
+            EditorSceneManager.activeSceneChangedInEditMode -= OnActiveSceneChanged;
+            EditorSceneManager.activeSceneChangedInEditMode += OnActiveSceneChanged;
             LoadSettings();
             RefreshTerrainList();
             LoadTerrainDatabase();
@@ -376,6 +413,41 @@ namespace DivineDragon.MapTools
         {
             terrainColorCache.Clear();
             paintableTerrainsDirty = true;
+            InvalidateTerrainHeightCache(null);
+        }
+
+        private static void InvalidateTerrainHeightCache(TerrainAssetAdapter terrain)
+        {
+            if (terrain == null)
+            {
+                terrainHeightCache.Clear();
+                sceneColliderCache.Clear();
+                loggedRaycastFailures.Clear();
+                return;
+            }
+
+            terrainHeightCache.Remove(terrain);
+
+            if (terrain?.Asset != null)
+            {
+                string assetPath = AssetDatabase.GetAssetPath(terrain.Asset);
+                if (!string.IsNullOrEmpty(assetPath))
+                {
+                    raycastLogRemovalBuffer.Clear();
+                    foreach (string key in loggedRaycastFailures)
+                    {
+                        if (string.Equals(key, assetPath, StringComparison.OrdinalIgnoreCase) || key.EndsWith("|" + assetPath, StringComparison.OrdinalIgnoreCase))
+                        {
+                            raycastLogRemovalBuffer.Add(key);
+                        }
+                    }
+
+                    foreach (string key in raycastLogRemovalBuffer)
+                    {
+                        loggedRaycastFailures.Remove(key);
+                    }
+                }
+            }
         }
 
         internal static void NotifyTerrainDatabaseChanged()
@@ -395,25 +467,50 @@ namespace DivineDragon.MapTools
 
         internal static float GetHeightOffsetForTerrain(TerrainAssetAdapter terrain)
         {
-            if (terrain?.Asset == null)
-            {
-                return 0f;
-            }
-
-            string path = AssetDatabase.GetAssetPath(terrain.Asset);
-            return GetHeightOffsetForPath(path);
+            return GetHeightSettings(terrain).offset;
         }
 
-        private static float GetHeightOffsetForPath(string assetPath)
+        private static TerrainHeightSettings GetHeightSettings(TerrainAssetAdapter terrain)
         {
             LoadTerrainHeightPreferencesIfNeeded();
 
-            if (!string.IsNullOrEmpty(assetPath) && terrainHeightOffsets.TryGetValue(assetPath, out float height))
+            if (terrain?.Asset == null)
             {
-                return height;
+                return new TerrainHeightSettings
+                {
+                    offset = 0f,
+                    mode = TerrainHeightMode.FixedOffset
+                };
             }
 
-            return 0f;
+            string path = AssetDatabase.GetAssetPath(terrain.Asset);
+            return GetHeightSettingsForPath(path);
+        }
+
+        private static TerrainHeightSettings GetHeightSettingsForPath(string assetPath)
+        {
+            LoadTerrainHeightPreferencesIfNeeded();
+
+            if (string.IsNullOrEmpty(assetPath))
+            {
+                return new TerrainHeightSettings
+                {
+                    offset = 0f,
+                    mode = TerrainHeightMode.FixedOffset
+                };
+            }
+
+            if (!terrainHeightSettings.TryGetValue(assetPath, out TerrainHeightSettings settings))
+            {
+                settings = new TerrainHeightSettings
+                {
+                    offset = 0f,
+                    mode = TerrainHeightMode.FixedOffset
+                };
+                terrainHeightSettings[assetPath] = settings;
+            }
+
+            return settings;
         }
 
         private static void LoadTerrainHeightPreferencesIfNeeded()
@@ -423,7 +520,7 @@ namespace DivineDragon.MapTools
                 return;
             }
 
-            terrainHeightOffsets.Clear();
+            terrainHeightSettings.Clear();
             string json = EditorPrefs.GetString(PREFS_TERRAIN_HEIGHTS, string.Empty);
             if (!string.IsNullOrEmpty(json))
             {
@@ -431,23 +528,36 @@ namespace DivineDragon.MapTools
                 {
                     var prefs = new TerrainHeightPreferences();
                     EditorJsonUtility.FromJsonOverwrite(json, prefs);
-                    if (prefs.paths != null && prefs.heights != null)
+                    if (prefs.paths != null)
                     {
-                        int count = Math.Min(prefs.paths.Count, prefs.heights.Count);
+                        int count = prefs.paths.Count;
                         for (int i = 0; i < count; i++)
                         {
                             string path = prefs.paths[i];
-                            if (!string.IsNullOrEmpty(path))
+                            if (string.IsNullOrEmpty(path))
                             {
-                                terrainHeightOffsets[path] = prefs.heights[i];
+                                continue;
                             }
+
+                            float offset = (prefs.heights != null && i < prefs.heights.Count) ? prefs.heights[i] : 0f;
+                            TerrainHeightMode mode = TerrainHeightMode.FixedOffset;
+                            if (prefs.modes != null && i < prefs.modes.Count)
+                            {
+                                mode = (TerrainHeightMode)Mathf.Clamp(prefs.modes[i], 0, (int)TerrainHeightMode.RaycastMesh);
+                            }
+
+                            terrainHeightSettings[path] = new TerrainHeightSettings
+                            {
+                                offset = offset,
+                                mode = mode
+                            };
                         }
                     }
                 }
                 catch (Exception ex)
                 {
                     Debug.LogWarning($"Failed to load terrain height preferences: {ex.Message}");
-                    terrainHeightOffsets.Clear();
+                    terrainHeightSettings.Clear();
                 }
             }
 
@@ -457,10 +567,11 @@ namespace DivineDragon.MapTools
         private static void SaveTerrainHeightPreferences()
         {
             var prefs = new TerrainHeightPreferences();
-            foreach (var kvp in terrainHeightOffsets)
+            foreach (var kvp in terrainHeightSettings)
             {
                 prefs.paths.Add(kvp.Key);
-                prefs.heights.Add(kvp.Value);
+                prefs.heights.Add(kvp.Value.offset);
+                prefs.modes.Add((int)kvp.Value.mode);
             }
 
             string json = EditorJsonUtility.ToJson(prefs);
@@ -479,21 +590,405 @@ namespace DivineDragon.MapTools
                 return;
             }
 
-            LoadTerrainHeightPreferencesIfNeeded();
-
             string path = AssetDatabase.GetAssetPath(selectedTerrain.Asset);
-            if (!string.IsNullOrEmpty(path))
+            if (string.IsNullOrEmpty(path))
             {
-                if (Mathf.Approximately(worldOffset.y, 0f))
-                {
-                    terrainHeightOffsets.Remove(path);
-                }
-                else
-                {
-                    terrainHeightOffsets[path] = worldOffset.y;
-                }
-                SaveTerrainHeightPreferences();
+                return;
             }
+
+            TerrainHeightSettings settings = GetHeightSettingsForPath(path);
+            settings.offset = worldOffset.y;
+            terrainHeightSettings[path] = settings;
+            SaveTerrainHeightPreferences();
+        }
+
+        private static void SetHeightModeForTerrain(TerrainAssetAdapter terrain, TerrainHeightMode mode)
+        {
+            if (terrain?.Asset == null)
+            {
+                return;
+            }
+
+            string path = AssetDatabase.GetAssetPath(terrain.Asset);
+            if (string.IsNullOrEmpty(path))
+            {
+                return;
+            }
+
+            TerrainHeightSettings settings = GetHeightSettingsForPath(path);
+            if (settings.mode == mode)
+            {
+                return;
+            }
+
+            settings.mode = mode;
+            terrainHeightSettings[path] = settings;
+            InvalidateTerrainHeightCache(terrain);
+            loggedRaycastFailures.Remove(path);
+            SaveTerrainHeightPreferences();
+        }
+
+        private static void OnActiveSceneChanged(Scene previousScene, Scene newScene)
+        {
+            InvalidateTerrainHeightCache(null);
+            SceneView.RepaintAll();
+            DisposToolWindow.RequestRepaintAll(repaintScene: true);
+        }
+
+        private static string GetSceneKey(Scene scene)
+        {
+            if (!scene.IsValid())
+            {
+                return string.Empty;
+            }
+
+            return !string.IsNullOrEmpty(scene.path) ? scene.path : scene.name;
+        }
+
+        private static string GetActiveSceneKey()
+        {
+            return GetSceneKey(SceneManager.GetActiveScene());
+        }
+
+        private static MeshCollider GetSceneMeshCollider(Scene scene)
+        {
+            string sceneKey = GetSceneKey(scene);
+            if (sceneColliderCache.TryGetValue(sceneKey, out MeshCollider cached) && cached != null)
+            {
+                return cached;
+            }
+
+            sceneColliderCache.Remove(sceneKey);
+
+            MeshCollider bmapCandidate = null;
+            MeshCollider fallback = null;
+
+            MeshCollider[] colliders = UnityEngine.Object.FindObjectsOfType<MeshCollider>(true);
+            foreach (MeshCollider collider in colliders)
+            {
+                if (collider == null || collider.sharedMesh == null)
+                {
+                    continue;
+                }
+
+                if (!collider.gameObject.scene.IsValid() || collider.gameObject.scene != scene)
+                {
+                    continue;
+                }
+
+                if (!collider.enabled)
+                {
+                    continue;
+                }
+
+                if (IsUnderBmap(collider.transform))
+                {
+                    bmapCandidate = collider;
+                    break;
+                }
+
+                if (fallback == null)
+                {
+                    fallback = collider;
+                }
+            }
+
+            MeshCollider result = bmapCandidate ?? fallback;
+            if (result != null)
+            {
+                sceneColliderCache[sceneKey] = result;
+            }
+
+            return result;
+        }
+
+        private static bool IsUnderBmap(Transform transform)
+        {
+            Transform current = transform;
+            while (current != null)
+            {
+                if (string.Equals(current.name, "Bmap", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+                current = current.parent;
+            }
+
+            return false;
+        }
+
+        private static string BuildRaycastLogKey(TerrainAssetAdapter terrain, string sceneKey)
+        {
+            string path = string.Empty;
+            if (terrain?.Asset != null)
+            {
+                path = AssetDatabase.GetAssetPath(terrain.Asset);
+            }
+
+            return string.IsNullOrEmpty(sceneKey) ? path : sceneKey + "|" + path;
+        }
+
+        private static void LogRaycastFailure(TerrainAssetAdapter terrain, string sceneKey, string message)
+        {
+            string key = BuildRaycastLogKey(terrain, sceneKey);
+            if (loggedRaycastFailures.Contains(key))
+            {
+                return;
+            }
+
+            string terrainName = terrain?.Name ?? "<none>";
+            string composedMessage = $"[Terrain Painter] {message} (Scene: {sceneKey}, Terrain: {terrainName})";
+            Debug.LogWarning(composedMessage);
+            loggedRaycastFailures.Add(key);
+        }
+
+        private static bool IsHeightCacheValid(TerrainAssetAdapter terrain, TerrainHeightSettings settings, TerrainHeightCache cache)
+        {
+            if (terrain == null || settings == null)
+            {
+                return false;
+            }
+
+            if (settings.mode != TerrainHeightMode.RaycastMesh)
+            {
+                return false;
+            }
+
+            if (cache == null || cache.centerSamples == null || cache.cornerSamples == null)
+            {
+                return false;
+            }
+
+            if (cache.mode != settings.mode)
+            {
+                return false;
+            }
+
+            if (cache.width != terrain.m_Width || cache.height != terrain.m_Height)
+            {
+                return false;
+            }
+
+            if (!Mathf.Approximately(cache.originX, terrain.m_X) || !Mathf.Approximately(cache.originZ, terrain.m_Z))
+            {
+                return false;
+            }
+
+            if (!Mathf.Approximately(cache.offsetX, worldOffset.x) || !Mathf.Approximately(cache.offsetZ, worldOffset.z))
+            {
+                return false;
+            }
+
+            if (!string.Equals(cache.sceneKey, GetActiveSceneKey(), StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            if (cache.centerSamples.Length != cache.width * cache.height)
+            {
+                return false;
+            }
+
+            if (cache.cornerSamples.Length != (cache.width + 1) * (cache.height + 1))
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        private static TerrainHeightCache GetOrBuildTerrainHeightCache(TerrainAssetAdapter terrain, TerrainHeightSettings settings)
+        {
+            if (terrain == null || settings == null || settings.mode != TerrainHeightMode.RaycastMesh)
+            {
+                return null;
+            }
+
+            if (!terrainHeightCache.TryGetValue(terrain, out TerrainHeightCache cache) || !IsHeightCacheValid(terrain, settings, cache))
+            {
+                cache = BuildTerrainHeightCache(terrain, settings);
+                terrainHeightCache[terrain] = cache;
+            }
+
+            return cache;
+        }
+
+        private static TerrainHeightCache BuildTerrainHeightCache(TerrainAssetAdapter terrain, TerrainHeightSettings settings)
+        {
+            var cache = new TerrainHeightCache
+            {
+                mode = settings.mode,
+                width = terrain.m_Width,
+                height = terrain.m_Height,
+                originX = terrain.m_X,
+                originZ = terrain.m_Z,
+                offsetX = worldOffset.x,
+                offsetZ = worldOffset.z,
+                sceneKey = GetActiveSceneKey()
+            };
+
+            int centerCount = Mathf.Max(0, cache.width * cache.height);
+            cache.centerSamples = new float[centerCount];
+            for (int i = 0; i < centerCount; i++)
+            {
+                cache.centerSamples[i] = float.NaN;
+            }
+
+            int cornerCount = (cache.width + 1) * (cache.height + 1);
+            cache.cornerSamples = new float[cornerCount];
+            for (int i = 0; i < cornerCount; i++)
+            {
+                cache.cornerSamples[i] = float.NaN;
+            }
+
+            Scene activeScene = SceneManager.GetActiveScene();
+            MeshCollider collider = GetSceneMeshCollider(activeScene);
+            if (collider == null)
+            {
+                LogRaycastFailure(terrain, cache.sceneKey, "No MeshCollider found in the active scene. Using fixed height instead.");
+                return cache;
+            }
+
+            Bounds bounds = collider.bounds;
+            float topY = bounds.max.y + 100f;
+            float bottomY = bounds.min.y - 100f;
+            float maxDistance = Mathf.Max(1f, topY - bottomY);
+            float startX = terrain.m_X + worldOffset.x;
+            float startZ = terrain.m_Z + worldOffset.z;
+            float halfTile = TILE_SIZE * 0.5f;
+
+            for (int row = 0; row <= cache.height; row++)
+            {
+                for (int col = 0; col <= cache.width; col++)
+                {
+                    int cornerIndex = row * (cache.width + 1) + col;
+                    float cornerX = startX + col * TILE_SIZE;
+                    float cornerZ = startZ + row * TILE_SIZE;
+
+                    if (TrySampleHeight(collider, topY, bottomY, maxDistance, cornerX, cornerZ, out float cornerHeight))
+                    {
+                        cache.cornerSamples[cornerIndex] = cornerHeight;
+                        cache.anyCornerHits = true;
+                    }
+                }
+            }
+
+            for (int row = 0; row < cache.height; row++)
+            {
+                for (int col = 0; col < cache.width; col++)
+                {
+                    int centerIndex = row * cache.width + col;
+                    float centerX = startX + col * TILE_SIZE + halfTile;
+                    float centerZ = startZ + row * TILE_SIZE + halfTile;
+
+                    if (TrySampleHeight(collider, topY, bottomY, maxDistance, centerX, centerZ, out float centerHeight))
+                    {
+                        cache.centerSamples[centerIndex] = centerHeight;
+                        cache.anyCenterHits = true;
+                    }
+                }
+            }
+
+            bool anyHits = cache.anyCenterHits || cache.anyCornerHits;
+            string logKey = BuildRaycastLogKey(terrain, cache.sceneKey);
+            if (anyHits)
+            {
+                loggedRaycastFailures.Remove(logKey);
+            }
+            else
+            {
+                LogRaycastFailure(terrain, cache.sceneKey, "Mesh raycasts hit nothing across the sampled terrain tiles. Using fixed height instead.");
+            }
+
+            return cache;
+        }
+
+        private static bool TrySampleHeight(MeshCollider collider, float topY, float bottomY, float maxDistance, float x, float z, out float height)
+        {
+            Vector3 downOrigin = new Vector3(x, topY, z);
+            Ray downRay = new Ray(downOrigin, Vector3.down);
+            if (collider.Raycast(downRay, out RaycastHit hit, maxDistance))
+            {
+                height = hit.point.y;
+                return true;
+            }
+
+            Vector3 upOrigin = new Vector3(x, bottomY, z);
+            Ray upRay = new Ray(upOrigin, Vector3.up);
+            if (collider.Raycast(upRay, out hit, maxDistance))
+            {
+                height = hit.point.y;
+                return true;
+            }
+
+            height = float.NaN;
+            return false;
+        }
+
+        private static float ResolveTileHeight(TerrainHeightCache cache, TerrainHeightSettings settings, int col, int row)
+        {
+            if (settings == null)
+            {
+                return worldOffset.y;
+            }
+
+            if (cache != null && cache.centerSamples != null && cache.width > 0 && cache.height > 0)
+            {
+                if (col >= 0 && col < cache.width && row >= 0 && row < cache.height)
+                {
+                    float sample = cache.centerSamples[row * cache.width + col];
+                    if (!float.IsNaN(sample))
+                    {
+                        return sample + settings.offset;
+                    }
+                }
+            }
+
+            return settings.offset;
+        }
+
+        private static float ResolveCornerHeight(TerrainHeightCache cache, TerrainHeightSettings settings, int col, int row)
+        {
+            if (settings == null)
+            {
+                return worldOffset.y;
+            }
+
+            if (cache != null && cache.cornerSamples != null && cache.width >= 0 && cache.height >= 0)
+            {
+                int maxCol = cache.width;
+                int maxRow = cache.height;
+                if (col >= 0 && col <= maxCol && row >= 0 && row <= maxRow)
+                {
+                    int index = row * (maxCol + 1) + col;
+                    if (index >= 0 && index < cache.cornerSamples.Length)
+                    {
+                        float sample = cache.cornerSamples[index];
+                        if (!float.IsNaN(sample))
+                        {
+                            return sample + settings.offset;
+                        }
+                    }
+                }
+            }
+
+            int fallbackCol = cache != null ? Mathf.Clamp(col, 0, Mathf.Max(cache.width - 1, 0)) : 0;
+            int fallbackRow = cache != null ? Mathf.Clamp(row, 0, Mathf.Max(cache.height - 1, 0)) : 0;
+            return ResolveTileHeight(cache, settings, fallbackCol, fallbackRow);
+        }
+
+        internal static float GetTileWorldHeight(TerrainAssetAdapter terrain, int col, int row)
+        {
+            TerrainHeightSettings settings = GetHeightSettings(terrain);
+            TerrainHeightCache cache = settings.mode == TerrainHeightMode.RaycastMesh ? GetOrBuildTerrainHeightCache(terrain, settings) : null;
+            return ResolveTileHeight(cache, settings, col, row);
+        }
+
+        internal static float GetTileCornerWorldHeight(TerrainAssetAdapter terrain, int cornerCol, int cornerRow)
+        {
+            TerrainHeightSettings settings = GetHeightSettings(terrain);
+            TerrainHeightCache cache = settings.mode == TerrainHeightMode.RaycastMesh ? GetOrBuildTerrainHeightCache(terrain, settings) : null;
+            return ResolveCornerHeight(cache, settings, cornerCol, cornerRow);
         }
 
         private static Color GetBaseTerrainColor(string terrainId)
@@ -537,6 +1032,32 @@ namespace DivineDragon.MapTools
             buffer[3] = new Vector3(x, baseY, z + size);
         }
 
+        private static void FillQuadWithCornerHeights(Vector3[] buffer, float x, float z, float size, float h00, float h10, float h11, float h01)
+        {
+            buffer[0] = new Vector3(x, h00, z);
+            buffer[1] = new Vector3(x + size, h10, z);
+            buffer[2] = new Vector3(x + size, h11, z + size);
+            buffer[3] = new Vector3(x, h01, z + size);
+        }
+
+        private static void FillTileQuad(Vector3[] buffer, float startX, float startZ, int col, int row, TerrainHeightCache cache, TerrainHeightSettings settings, float fallbackY, float yOffset = 0f)
+        {
+            float baseX = startX + col * TILE_SIZE;
+            float baseZ = startZ + row * TILE_SIZE;
+
+            if (settings != null && settings.mode == TerrainHeightMode.RaycastMesh && cache != null)
+            {
+                float h00 = ResolveCornerHeight(cache, settings, col, row) + yOffset;
+                float h10 = ResolveCornerHeight(cache, settings, col + 1, row) + yOffset;
+                float h11 = ResolveCornerHeight(cache, settings, col + 1, row + 1) + yOffset;
+                float h01 = ResolveCornerHeight(cache, settings, col, row + 1) + yOffset;
+                FillQuadWithCornerHeights(buffer, baseX, baseZ, TILE_SIZE, h00, h10, h11, h01);
+                return;
+            }
+
+            FillQuad(buffer, baseX, baseZ, fallbackY, TILE_SIZE, yOffset);
+        }
+
         // Modifier detection for sampling (support Ctrl and Cmd)
         private static bool IsSamplingModifier(Event e)
         {
@@ -569,6 +1090,7 @@ namespace DivineDragon.MapTools
                 islandCache.Remove(terrain);
                 InvalidateVirtualGrid(terrain);
                 TerrainRegionCache.Invalidate(terrain);
+                InvalidateTerrainHeightCache(terrain);
             }
         }
 
@@ -590,18 +1112,21 @@ namespace DivineDragon.MapTools
         {
             public List<string> paths = new List<string>();
             public List<float> heights = new List<float>();
+            public List<int> modes = new List<int>();
         }
         
         private void OnDisable()
         {
             SceneView.duringSceneGui -= OnSceneGUI;
             Undo.undoRedoPerformed -= OnUndoRedo;
+            EditorSceneManager.activeSceneChangedInEditMode -= OnActiveSceneChanged;
         }
-        
+
         private void OnDestroy()
         {
             SceneView.duringSceneGui -= OnSceneGUI;
             Undo.undoRedoPerformed -= OnUndoRedo;
+            EditorSceneManager.activeSceneChangedInEditMode -= OnActiveSceneChanged;
         }
         
         private void LoadSettings()
@@ -785,11 +1310,27 @@ namespace DivineDragon.MapTools
                                            $"Total Tiles: {selectedTerrain.Width * selectedTerrain.Height}", 
                                            MessageType.Info);
 
+                    TerrainHeightSettings heightSettings = GetHeightSettings(selectedTerrain);
+
                     EditorGUI.BeginChangeCheck();
-                    float newHeight = EditorGUILayout.FloatField(new GUIContent("Height Offset", "Vertical offset applied when rendering terrain overlays"), worldOffset.y);
+                    TerrainHeightMode newMode = (TerrainHeightMode)EditorGUILayout.EnumPopup(
+                        new GUIContent("Height Mode", "Choose how overlay heights are computed: a fixed offset plane or raycasts against the active scene mesh."),
+                        heightSettings.mode);
+                    if (EditorGUI.EndChangeCheck())
+                    {
+                        SetHeightModeForTerrain(selectedTerrain, newMode);
+                        SceneView.RepaintAll();
+                        DisposToolWindow.RequestRepaintAll(repaintScene: true);
+                    }
+
+                    EditorGUI.BeginChangeCheck();
+                    float newHeight = EditorGUILayout.FloatField(
+                        new GUIContent("Height Offset", "Vertical offset applied after sampling. Positive values lift the overlay above the base height."),
+                        heightSettings.offset);
                     if (EditorGUI.EndChangeCheck())
                     {
                         worldOffset.y = newHeight;
+                        heightSettings.offset = newHeight;
                         SaveSettings();
                         SceneView.RepaintAll();
                         DisposToolWindow.RequestRepaintAll(repaintScene: true);
@@ -1090,11 +1631,20 @@ namespace DivineDragon.MapTools
             int height = selectedTerrain.m_Height;
             float startX = selectedTerrain.m_X + worldOffset.x;
             float startZ = selectedTerrain.m_Z + worldOffset.z;
-            float y = worldOffset.y;
-            
+
+            TerrainHeightSettings heightSettings = GetHeightSettings(selectedTerrain);
+            TerrainHeightCache heightCache = heightSettings.mode == TerrainHeightMode.RaycastMesh ? GetOrBuildTerrainHeightCache(selectedTerrain, heightSettings) : null;
+            float basePlaneY = heightSettings.offset;
+
+            int lastColIndex = Mathf.Max(width - 1, 0);
+            int lastRowIndex = Mathf.Max(height - 1, 0);
+            int centerCol = width > 0 ? Mathf.Clamp(width / 2, 0, lastColIndex) : 0;
+            int centerRow = height > 0 ? Mathf.Clamp(height / 2, 0, lastRowIndex) : 0;
+            float centerHeight = ResolveTileHeight(heightCache, heightSettings, centerCol, centerRow);
+
             float terrainCenterX = startX + (width * TILE_SIZE) / 2f;
             float terrainCenterZ = startZ + (height * TILE_SIZE) / 2f;
-            float cameraDistance = GetCameraDistance(sceneView, terrainCenterX, terrainCenterZ, y);
+            float cameraDistance = GetCameraDistance(sceneView, terrainCenterX, terrainCenterZ, centerHeight);
             
             float currentTime = (float)EditorApplication.timeSinceStartup;
             float deltaTime = Mathf.Min(currentTime - lastFrameTime, 0.1f);
@@ -1127,7 +1677,7 @@ namespace DivineDragon.MapTools
                 lastCameraFOV = currentFOV;
             }
             
-            HandleMouseInput(width, height, startX, startZ, y);
+            HandleMouseInput(width, height, startX, startZ, basePlaneY, heightSettings);
             
             bool isRepaint = Event.current.type == EventType.Repaint;
 
@@ -1147,27 +1697,46 @@ namespace DivineDragon.MapTools
                         float tileX = startX + col * TILE_SIZE;
                         float tileZ = startZ + row * TILE_SIZE;
 
-                        FillQuad(s_TileVertices, tileX, tileZ, y);
+                        float tileHeight = ResolveTileHeight(heightCache, heightSettings, col, row);
+                        FillTileQuad(s_TileVertices, startX, startZ, col, row, heightCache, heightSettings, tileHeight);
                         Color tileColor = GetTileFillColor(terrainId);
                         Handles.DrawSolidRectangleWithOutline(s_TileVertices, tileColor, Color.clear);
                     }
                 }
             }
             
-            if (isRepaint && showGridLines)
+            if (isRepaint && showGridLines && width > 0 && height > 0)
             {
                 Handles.color = gridColor;
+                float gridLift = 0.01f;
                 for (int row = 0; row <= height; row++)
                 {
-                    Vector3 start = new Vector3(startX, y + 0.01f, startZ + row * TILE_SIZE);
-                    Vector3 end = new Vector3(startX + width * TILE_SIZE, y + 0.01f, startZ + row * TILE_SIZE);
-                    Handles.DrawLine(start, end, gridThickness);
+                    float z = startZ + row * TILE_SIZE;
+                    for (int col = 0; col < width; col++)
+                    {
+                        float x0 = startX + col * TILE_SIZE;
+                        float x1 = startX + (col + 1) * TILE_SIZE;
+                        float hStart = ResolveCornerHeight(heightCache, heightSettings, col, row) + gridLift;
+                        float hEnd = ResolveCornerHeight(heightCache, heightSettings, col + 1, row) + gridLift;
+                        Vector3 start = new Vector3(x0, hStart, z);
+                        Vector3 end = new Vector3(x1, hEnd, z);
+                        Handles.DrawLine(start, end, gridThickness);
+                    }
                 }
+
                 for (int col = 0; col <= width; col++)
                 {
-                    Vector3 start = new Vector3(startX + col * TILE_SIZE, y + 0.01f, startZ);
-                    Vector3 end = new Vector3(startX + col * TILE_SIZE, y + 0.01f, startZ + height * TILE_SIZE);
-                    Handles.DrawLine(start, end, gridThickness);
+                    float x = startX + col * TILE_SIZE;
+                    for (int row = 0; row < height; row++)
+                    {
+                        float z0 = startZ + row * TILE_SIZE;
+                        float z1 = startZ + (row + 1) * TILE_SIZE;
+                        float hStart = ResolveCornerHeight(heightCache, heightSettings, col, row) + gridLift;
+                        float hEnd = ResolveCornerHeight(heightCache, heightSettings, col, row + 1) + gridLift;
+                        Vector3 start = new Vector3(x, hStart, z0);
+                        Vector3 end = new Vector3(x, hEnd, z1);
+                        Handles.DrawLine(start, end, gridThickness);
+                    }
                 }
             }
             
@@ -1179,7 +1748,7 @@ namespace DivineDragon.MapTools
                     if (IsEmptyTerrain(island.terrainId))
                         continue;
                     Color borderColor = GetBorderColor(island.terrainId);
-                    DrawIslandBorders(island, width, height, startX, startZ, y, borderColor);
+                    DrawIslandBorders(island, width, height, startX, startZ, heightCache, heightSettings, borderColor);
                 }
             }
             
@@ -1232,7 +1801,7 @@ namespace DivineDragon.MapTools
             
             if (isRepaint && currentHighlightRegion != null && currentHighlightRegion.Count > 0)
             {
-                DrawRegionHighlight(currentHighlightRegion, startX, startZ, y, highlightTerrainId);
+                DrawRegionHighlight(currentHighlightRegion, startX, startZ, heightCache, heightSettings, highlightTerrainId);
             }
 
             bool allowAnyLabels = displayMode != DisplayMode.ColorOnly;
@@ -1286,7 +1855,10 @@ namespace DivineDragon.MapTools
                         {
                             float centerX = startX + labelPos.x * TILE_SIZE + TILE_SIZE * 0.5f;
                             float centerZ = startZ + labelPos.y * TILE_SIZE + TILE_SIZE * 0.5f;
-                            Vector3 worldPos = new Vector3(centerX, y, centerZ);
+                            int labelCol = Mathf.Clamp(Mathf.RoundToInt(labelPos.x), 0, lastColIndex);
+                            int labelRow = Mathf.Clamp(Mathf.RoundToInt(labelPos.y), 0, lastRowIndex);
+                            float labelHeight = ResolveTileHeight(heightCache, heightSettings, labelCol, labelRow) + 0.02f;
+                            Vector3 worldPos = new Vector3(centerX, labelHeight, centerZ);
 
                             string textKey = island.terrainId + "|" + textDisplayMode;
                             if (!s_LabelTextCache.TryGetValue(textKey, out string displayText))
@@ -1344,7 +1916,10 @@ namespace DivineDragon.MapTools
                         {
                             float centerX = startX + labelPos.x * TILE_SIZE + TILE_SIZE * 0.5f;
                             float centerZ = startZ + labelPos.y * TILE_SIZE + TILE_SIZE * 0.5f;
-                            Vector3 worldPos = new Vector3(centerX, y, centerZ);
+                            int labelCol = Mathf.Clamp(Mathf.RoundToInt(labelPos.x), 0, lastColIndex);
+                            int labelRow = Mathf.Clamp(Mathf.RoundToInt(labelPos.y), 0, lastRowIndex);
+                            float labelHeight = ResolveTileHeight(heightCache, heightSettings, labelCol, labelRow) + 0.02f;
+                            Vector3 worldPos = new Vector3(centerX, labelHeight, centerZ);
 
                             string textKey = island.terrainId + "|" + textDisplayMode;
                             if (!s_LabelTextCache.TryGetValue(textKey, out string displayText))
@@ -1398,7 +1973,10 @@ namespace DivineDragon.MapTools
             {
                 float hoverX = startX + hoveredTile.x * TILE_SIZE + TILE_SIZE * 0.5f;
                 float hoverZ = startZ + hoveredTile.y * TILE_SIZE + TILE_SIZE * 0.5f;
-                Vector3 hoverPos = new Vector3(hoverX, y, hoverZ);
+                int hoverCol = Mathf.Clamp(hoveredTile.x, 0, lastColIndex);
+                int hoverRow = Mathf.Clamp(hoveredTile.y, 0, lastRowIndex);
+                float hoverHeight = ResolveTileHeight(heightCache, heightSettings, hoverCol, hoverRow) + 0.05f;
+                Vector3 hoverPos = new Vector3(hoverX, hoverHeight, hoverZ);
                 string hoverDisplayText = GetTerrainDisplayText(hoveredTerrainId);
                 Color hoverLabelColor = ResolveLabelColor(hoveredTerrainId, false);
                 if (s_LabelStyleHover == null) s_LabelStyleHover = new GUIStyle();
@@ -1414,19 +1992,19 @@ namespace DivineDragon.MapTools
 
             if (paintMode && isMouseOverGrid)
             {
-                DrawBrushPreview(hoveredTile, width, height, startX, startZ, y);
+                DrawBrushPreview(hoveredTile, width, height, startX, startZ, heightCache, heightSettings);
             }
 
             if (uiTabIndex == 2 && selectedTerrain != null)
             {
                 if (newTerrainWidth != width || newTerrainHeight != height)
                 {
-                    DrawResizePreview(width, height, startX, startZ, y);
+                    DrawResizePreview(width, height, startX, startZ, heightCache, heightSettings);
                 }
-                
+
                 if (previewTerrains != null && (mirrorPreviewMode != MirrorMode.None || shiftPreviewMode != ShiftDirection.None))
                 {
-                    DrawAdvancedOperationPreview(width, height, startX, startZ, y);
+                    DrawAdvancedOperationPreview(width, height, startX, startZ, heightCache, heightSettings);
                 }
             }
 
@@ -1508,7 +2086,7 @@ namespace DivineDragon.MapTools
             paintedIndicesThisDrag.Clear();
         }
 
-        private static void HandleMouseInput(int width, int height, float startX, float startZ, float y)
+        private static void HandleMouseInput(int width, int height, float startX, float startZ, float basePlaneY, TerrainHeightSettings heightSettings)
         {
             Event currentEvent = Event.current;
             if (externalInteractionLock)
@@ -1525,64 +2103,87 @@ namespace DivineDragon.MapTools
             bool prevOver = isMouseOverGrid;
 
             Ray ray = HandleUtility.GUIPointToWorldRay(currentEvent.mousePosition);
-            float distance = (y - ray.origin.y) / ray.direction.y;
-            if (distance < 0)
+
+            Vector3? intersection = null;
+            bool useMeshRaycast = heightSettings != null && heightSettings.mode == TerrainHeightMode.RaycastMesh;
+            if (useMeshRaycast)
             {
-                isMouseOverGrid = false;
-                return;
+                MeshCollider collider = GetSceneMeshCollider(SceneManager.GetActiveScene());
+                if (collider != null && collider.Raycast(ray, out RaycastHit meshHit, 10000f))
+                {
+                    intersection = meshHit.point;
+                }
             }
 
-            Vector3 hitPoint = ray.origin + ray.direction * distance;
+            if (!intersection.HasValue)
+            {
+                float denom = ray.direction.y;
+                if (Mathf.Approximately(denom, 0f))
+                {
+                    isMouseOverGrid = false;
+                    return;
+                }
+
+                float distance = (basePlaneY - ray.origin.y) / denom;
+                if (distance < 0f)
+                {
+                    isMouseOverGrid = false;
+                    return;
+                }
+
+                intersection = ray.origin + ray.direction * distance;
+            }
+
+            Vector3 hitPoint = intersection.Value;
             int gridX = Mathf.FloorToInt((hitPoint.x - startX) / TILE_SIZE);
             int gridZ = Mathf.FloorToInt((hitPoint.z - startZ) / TILE_SIZE);
 
-            if (gridX >= 0 && gridX < width && gridZ >= 0 && gridZ < height)
-            {
-                hoveredTile = new Vector2Int(gridX, gridZ);
-                isMouseOverGrid = true;
-
-                if (paintMode && !externalInteractionLock)
-                {
-                    if (currentEvent.type == EventType.MouseDown || currentEvent.type == EventType.MouseDrag || currentEvent.type == EventType.MouseUp)
-                    {
-                        if (currentEvent.button == 0)
-                        {
-                            if (IsSamplingModifier(currentEvent) && currentEvent.type == EventType.MouseDown)
-                            {
-                                PickTerrain(hoveredTile, width);
-                            }
-                            else
-                            {
-                                if (currentEvent.type == EventType.MouseDown)
-                                {
-                                    BeginPaintStroke();
-                                    PaintTerrainDedup(hoveredTile, width, height);
-                                }
-                                else if (currentEvent.type == EventType.MouseDrag && isPaintingStroke)
-                                {
-                                    PaintTerrainDedup(hoveredTile, width, height);
-                                }
-                                else if (currentEvent.type == EventType.MouseUp && isPaintingStroke)
-                                {
-                                    EndPaintStroke();
-                                }
-                            }
-                            currentEvent.Use();
-                        }
-                    }
-
-                    if (currentEvent.type == EventType.Layout && currentEvent.button == 0)
-                    {
-                        HandleUtility.AddDefaultControl(GUIUtility.GetControlID(FocusType.Passive));
-                    }
-                }
-            }
-            else
+            if (gridX < 0 || gridX >= width || gridZ < 0 || gridZ >= height)
             {
                 isMouseOverGrid = false;
                 if (isPaintingStroke)
                 {
                     EndPaintStroke();
+                }
+                return;
+            }
+
+            hoveredTile = new Vector2Int(gridX, gridZ);
+            isMouseOverGrid = true;
+
+            if (paintMode && !externalInteractionLock)
+            {
+                if (currentEvent.type == EventType.MouseDown || currentEvent.type == EventType.MouseDrag || currentEvent.type == EventType.MouseUp)
+                {
+                    if (currentEvent.button == 0)
+                    {
+                        if (IsSamplingModifier(currentEvent) && currentEvent.type == EventType.MouseDown)
+                        {
+                            PickTerrain(hoveredTile, width);
+                        }
+                        else
+                        {
+                            if (currentEvent.type == EventType.MouseDown)
+                            {
+                                BeginPaintStroke();
+                                PaintTerrainDedup(hoveredTile, width, height);
+                            }
+                            else if (currentEvent.type == EventType.MouseDrag && isPaintingStroke)
+                            {
+                                PaintTerrainDedup(hoveredTile, width, height);
+                            }
+                            else if (currentEvent.type == EventType.MouseUp && isPaintingStroke)
+                            {
+                                EndPaintStroke();
+                            }
+                        }
+                        currentEvent.Use();
+                    }
+                }
+
+                if (currentEvent.type == EventType.Layout && currentEvent.button == 0)
+                {
+                    HandleUtility.AddDefaultControl(GUIUtility.GetControlID(FocusType.Passive));
                 }
             }
 
@@ -1711,7 +2312,7 @@ namespace DivineDragon.MapTools
             return island;
         }
         
-        private static void DrawBrushPreview(Vector2Int centerTile, int width, int height, float startX, float startZ, float y)
+        private static void DrawBrushPreview(Vector2Int centerTile, int width, int height, float startX, float startZ, TerrainHeightCache heightCache, TerrainHeightSettings heightSettings)
         {
             Event currentEvent = Event.current;
             bool isSampling = IsSamplingModifier(currentEvent);
@@ -1721,8 +2322,9 @@ namespace DivineDragon.MapTools
                 // Draw sampling indicator - single tile showing the color that would be sampled
                 float worldX = startX + centerTile.x * TILE_SIZE;
                 float worldZ = startZ + centerTile.y * TILE_SIZE;
-                
-                FillQuad(s_TileVerticesOverlay, worldX, worldZ, y, TILE_SIZE, 0.05f);
+
+                float tileHeight = ResolveTileHeight(heightCache, heightSettings, centerTile.x, centerTile.y);
+                FillTileQuad(s_TileVerticesOverlay, startX, startZ, centerTile.x, centerTile.y, heightCache, heightSettings, tileHeight, 0.05f);
 
                 // Get the actual terrain color at the hovered tile
                 // This should match EXACTLY how the tiles are displayed on the map (with brightness adjustment)
@@ -1763,7 +2365,7 @@ namespace DivineDragon.MapTools
                 Handles.DrawSolidRectangleWithOutline(s_TileVerticesOverlay, sampleColor, sampleOutline);
                 
                 // Draw "Sample" text over the tile
-                Vector3 tileCenter = new Vector3(worldX + TILE_SIZE * 0.5f, y + 0.1f, worldZ + TILE_SIZE * 0.5f);
+                Vector3 tileCenter = new Vector3(worldX + TILE_SIZE * 0.5f, tileHeight + 0.1f, worldZ + TILE_SIZE * 0.5f);
                 Vector2 guiPos = HandleUtility.WorldToGUIPoint(tileCenter);
                 
                 Handles.BeginGUI();
@@ -1800,7 +2402,7 @@ namespace DivineDragon.MapTools
                 {
                     // Fallback to yellow if no terrain selected
                     Color previewColor = new Color(1f, 1f, 0f, 0.3f);
-                    DrawBrushTiles(centerTile, width, height, startX, startZ, y, previewColor, Color.yellow);
+                    DrawBrushTiles(centerTile, width, height, startX, startZ, heightCache, heightSettings, previewColor, Color.yellow);
                 }
                 else
                 {
@@ -1819,15 +2421,15 @@ namespace DivineDragon.MapTools
                     );
 
                     // Draw the preview tiles
-                    DrawBrushTiles(centerTile, width, height, startX, startZ, y, previewColor, outlineColor);
+                    DrawBrushTiles(centerTile, width, height, startX, startZ, heightCache, heightSettings, previewColor, outlineColor);
 
                     // Draw preview borders for the new terrain
-                    DrawPreviewBorders(centerTile, width, height, startX, startZ, y, outlineColor);
+                    DrawPreviewBorders(centerTile, width, height, startX, startZ, heightCache, heightSettings, outlineColor);
                 }
             }
         }
         
-        private static void DrawBrushTiles(Vector2Int centerTile, int width, int height, float startX, float startZ, float y, Color fillColor, Color outlineColor)
+        private static void DrawBrushTiles(Vector2Int centerTile, int width, int height, float startX, float startZ, TerrainHeightCache heightCache, TerrainHeightSettings heightSettings, Color fillColor, Color outlineColor)
         {
             int halfSize = (brushSize - 1) / 2;
             TerrainVirtualGrid grid = GetVirtualGrid(selectedTerrain);
@@ -1856,10 +2458,8 @@ namespace DivineDragon.MapTools
                             }
                         }
 
-                        float worldX = startX + tileX * TILE_SIZE;
-                        float worldZ = startZ + tileZ * TILE_SIZE;
-
-                        FillQuad(s_TileVerticesOverlay, worldX, worldZ, y, TILE_SIZE, 0.05f);
+                        float tileHeight = ResolveTileHeight(heightCache, heightSettings, tileX, tileZ);
+                        FillTileQuad(s_TileVerticesOverlay, startX, startZ, tileX, tileZ, heightCache, heightSettings, tileHeight, 0.05f);
 
                         Handles.DrawSolidRectangleWithOutline(s_TileVerticesOverlay, fillColor, outlineColor);
                     }
@@ -1867,7 +2467,7 @@ namespace DivineDragon.MapTools
             }
         }
         
-        private static void DrawPreviewBorders(Vector2Int centerTile, int width, int height, float startX, float startZ, float y, Color borderColor)
+        private static void DrawPreviewBorders(Vector2Int centerTile, int width, int height, float startX, float startZ, TerrainHeightCache heightCache, TerrainHeightSettings heightSettings, Color borderColor)
         {
             // Collect all tiles that would be painted
             HashSet<Vector2Int> paintedTiles = new HashSet<Vector2Int>();
@@ -1911,37 +2511,45 @@ namespace DivineDragon.MapTools
             {
                 float tileX = startX + tile.x * TILE_SIZE;
                 float tileZ = startZ + tile.y * TILE_SIZE;
-                
+
                 // Check each edge to see if it's a border
                 // Top edge
                 if (!paintedTiles.Contains(new Vector2Int(tile.x, tile.y + 1)))
                 {
-                    Vector3 lineStart = new Vector3(tileX, y + 0.06f, tileZ + TILE_SIZE);
-                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, y + 0.06f, tileZ + TILE_SIZE);
+                    float hStart = ResolveCornerHeight(heightCache, heightSettings, tile.x, tile.y + 1) + 0.06f;
+                    float hEnd = ResolveCornerHeight(heightCache, heightSettings, tile.x + 1, tile.y + 1) + 0.06f;
+                    Vector3 lineStart = new Vector3(tileX, hStart, tileZ + TILE_SIZE);
+                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, hEnd, tileZ + TILE_SIZE);
                     Handles.DrawLine(lineStart, lineEnd, borderThickness);
                 }
-                
+
                 // Right edge
                 if (!paintedTiles.Contains(new Vector2Int(tile.x + 1, tile.y)))
                 {
-                    Vector3 lineStart = new Vector3(tileX + TILE_SIZE, y + 0.06f, tileZ);
-                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, y + 0.06f, tileZ + TILE_SIZE);
+                    float hStart = ResolveCornerHeight(heightCache, heightSettings, tile.x + 1, tile.y) + 0.06f;
+                    float hEnd = ResolveCornerHeight(heightCache, heightSettings, tile.x + 1, tile.y + 1) + 0.06f;
+                    Vector3 lineStart = new Vector3(tileX + TILE_SIZE, hStart, tileZ);
+                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, hEnd, tileZ + TILE_SIZE);
                     Handles.DrawLine(lineStart, lineEnd, borderThickness);
                 }
-                
+
                 // Bottom edge
                 if (!paintedTiles.Contains(new Vector2Int(tile.x, tile.y - 1)))
                 {
-                    Vector3 lineStart = new Vector3(tileX, y + 0.06f, tileZ);
-                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, y + 0.06f, tileZ);
+                    float hStart = ResolveCornerHeight(heightCache, heightSettings, tile.x, tile.y) + 0.06f;
+                    float hEnd = ResolveCornerHeight(heightCache, heightSettings, tile.x + 1, tile.y) + 0.06f;
+                    Vector3 lineStart = new Vector3(tileX, hStart, tileZ);
+                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, hEnd, tileZ);
                     Handles.DrawLine(lineStart, lineEnd, borderThickness);
                 }
-                
+
                 // Left edge
                 if (!paintedTiles.Contains(new Vector2Int(tile.x - 1, tile.y)))
                 {
-                    Vector3 lineStart = new Vector3(tileX, y + 0.06f, tileZ);
-                    Vector3 lineEnd = new Vector3(tileX, y + 0.06f, tileZ + TILE_SIZE);
+                    float hStart = ResolveCornerHeight(heightCache, heightSettings, tile.x, tile.y) + 0.06f;
+                    float hEnd = ResolveCornerHeight(heightCache, heightSettings, tile.x, tile.y + 1) + 0.06f;
+                    Vector3 lineStart = new Vector3(tileX, hStart, tileZ);
+                    Vector3 lineEnd = new Vector3(tileX, hEnd, tileZ + TILE_SIZE);
                     Handles.DrawLine(lineStart, lineEnd, borderThickness);
                 }
             }
@@ -1985,7 +2593,7 @@ namespace DivineDragon.MapTools
             return TerrainRegionCache.GetSameTerrainRegion(terrain, grid, startTile, width, height, useCache: false);
         }
         
-        private static void DrawRegionHighlight(HashSet<Vector2Int> region, float startX, float startZ, float y, string terrainId)
+        private static void DrawRegionHighlight(HashSet<Vector2Int> region, float startX, float startZ, TerrainHeightCache heightCache, TerrainHeightSettings heightSettings, string terrainId)
         {
             if (region.Count == 0) return;
             
@@ -2007,22 +2615,26 @@ namespace DivineDragon.MapTools
                 // Top edge
                 if (!region.Contains(neighbors[0]))
                 {
-                    edges.Add((new Vector2Int(tile.x, tile.y + 1), new Vector2Int(tile.x + 1, tile.y + 1)));
+                    var edge = (new Vector2Int(tile.x, tile.y + 1), new Vector2Int(tile.x + 1, tile.y + 1));
+                    edges.Add(edge);
                 }
                 // Right edge
                 if (!region.Contains(neighbors[1]))
                 {
-                    edges.Add((new Vector2Int(tile.x + 1, tile.y), new Vector2Int(tile.x + 1, tile.y + 1)));
+                    var edge = (new Vector2Int(tile.x + 1, tile.y), new Vector2Int(tile.x + 1, tile.y + 1));
+                    edges.Add(edge);
                 }
                 // Bottom edge
                 if (!region.Contains(neighbors[2]))
                 {
-                    edges.Add((new Vector2Int(tile.x, tile.y), new Vector2Int(tile.x + 1, tile.y)));
+                    var edge = (new Vector2Int(tile.x, tile.y), new Vector2Int(tile.x + 1, tile.y));
+                    edges.Add(edge);
                 }
                 // Left edge
                 if (!region.Contains(neighbors[3]))
                 {
-                    edges.Add((new Vector2Int(tile.x, tile.y), new Vector2Int(tile.x, tile.y + 1)));
+                    var edge = (new Vector2Int(tile.x, tile.y), new Vector2Int(tile.x, tile.y + 1));
+                    edges.Add(edge);
                 }
             }
             
@@ -2068,54 +2680,36 @@ namespace DivineDragon.MapTools
             Handles.color = glowColor;
             foreach (var edge in edges)
             {
-                Vector3 start = new Vector3(
-                    startX + edge.Item1.x * TILE_SIZE,
-                    y + 0.028f,
-                    startZ + edge.Item1.y * TILE_SIZE
-                );
-                Vector3 end = new Vector3(
-                    startX + edge.Item2.x * TILE_SIZE,
-                    y + 0.028f,
-                    startZ + edge.Item2.y * TILE_SIZE
-                );
+                float hStart = ResolveCornerHeight(heightCache, heightSettings, edge.Item1.x, edge.Item1.y) + 0.028f;
+                float hEnd = ResolveCornerHeight(heightCache, heightSettings, edge.Item2.x, edge.Item2.y) + 0.028f;
+                Vector3 start = new Vector3(startX + edge.Item1.x * TILE_SIZE, hStart, startZ + edge.Item1.y * TILE_SIZE);
+                Vector3 end = new Vector3(startX + edge.Item2.x * TILE_SIZE, hEnd, startZ + edge.Item2.y * TILE_SIZE);
                 Handles.DrawLine(start, end, 4f);
             }
-            
+
             // Middle layer (medium width, medium opacity)
             Color midColor = Color.Lerp(outlineColor, borderColor, 0.5f);
             midColor.a = 0.4f;
             Handles.color = midColor;
             foreach (var edge in edges)
             {
-                Vector3 start = new Vector3(
-                    startX + edge.Item1.x * TILE_SIZE,
-                    y + 0.031f,
-                    startZ + edge.Item1.y * TILE_SIZE
-                );
-                Vector3 end = new Vector3(
-                    startX + edge.Item2.x * TILE_SIZE,
-                    y + 0.031f,
-                    startZ + edge.Item2.y * TILE_SIZE
-                );
+                float hStart = ResolveCornerHeight(heightCache, heightSettings, edge.Item1.x, edge.Item1.y) + 0.031f;
+                float hEnd = ResolveCornerHeight(heightCache, heightSettings, edge.Item2.x, edge.Item2.y) + 0.031f;
+                Vector3 start = new Vector3(startX + edge.Item1.x * TILE_SIZE, hStart, startZ + edge.Item1.y * TILE_SIZE);
+                Vector3 end = new Vector3(startX + edge.Item2.x * TILE_SIZE, hEnd, startZ + edge.Item2.y * TILE_SIZE);
                 Handles.DrawLine(start, end, 3f);
             }
-            
+
             // Core border (thinnest, most opaque)
             Color coreColor = borderColor;
             coreColor.a = 0.8f;
             Handles.color = coreColor;
             foreach (var edge in edges)
             {
-                Vector3 start = new Vector3(
-                    startX + edge.Item1.x * TILE_SIZE,
-                    y + 0.034f,
-                    startZ + edge.Item1.y * TILE_SIZE
-                );
-                Vector3 end = new Vector3(
-                    startX + edge.Item2.x * TILE_SIZE,
-                    y + 0.034f,
-                    startZ + edge.Item2.y * TILE_SIZE
-                );
+                float hStart = ResolveCornerHeight(heightCache, heightSettings, edge.Item1.x, edge.Item1.y) + 0.034f;
+                float hEnd = ResolveCornerHeight(heightCache, heightSettings, edge.Item2.x, edge.Item2.y) + 0.034f;
+                Vector3 start = new Vector3(startX + edge.Item1.x * TILE_SIZE, hStart, startZ + edge.Item1.y * TILE_SIZE);
+                Vector3 end = new Vector3(startX + edge.Item2.x * TILE_SIZE, hEnd, startZ + edge.Item2.y * TILE_SIZE);
                 Handles.DrawLine(start, end, 2f);
             }
         }
@@ -2313,7 +2907,7 @@ namespace DivineDragon.MapTools
             GUI.Label(textRect, s_LabelContent, textStyle);
         }
         
-        private static void DrawIslandBorders(TerrainIsland island, int mapWidth, int mapHeight, float startX, float startZ, float y, Color borderColor)
+        private static void DrawIslandBorders(TerrainIsland island, int mapWidth, int mapHeight, float startX, float startZ, TerrainHeightCache heightCache, TerrainHeightSettings heightSettings, Color borderColor)
         {
             Handles.color = borderColor;
             float borderThickness = 3f;
@@ -2324,37 +2918,44 @@ namespace DivineDragon.MapTools
             {
                 float tileX = startX + tile.x * TILE_SIZE;
                 float tileZ = startZ + tile.y * TILE_SIZE;
-                
                 // Check all 4 edges
                 // Top edge (z+)
                 if (tile.y >= mapHeight - 1 || !islandTiles.Contains(new Vector2Int(tile.x, tile.y + 1)))
                 {
-                    Vector3 lineStart = new Vector3(tileX, y + 0.02f, tileZ + TILE_SIZE);
-                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, y + 0.02f, tileZ + TILE_SIZE);
+                    float hStart = ResolveCornerHeight(heightCache, heightSettings, tile.x, tile.y + 1) + 0.02f;
+                    float hEnd = ResolveCornerHeight(heightCache, heightSettings, tile.x + 1, tile.y + 1) + 0.02f;
+                    Vector3 lineStart = new Vector3(tileX, hStart, tileZ + TILE_SIZE);
+                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, hEnd, tileZ + TILE_SIZE);
                     Handles.DrawLine(lineStart, lineEnd, borderThickness);
                 }
                 
                 // Right edge (x+)
                 if (tile.x >= mapWidth - 1 || !islandTiles.Contains(new Vector2Int(tile.x + 1, tile.y)))
                 {
-                    Vector3 lineStart = new Vector3(tileX + TILE_SIZE, y + 0.02f, tileZ);
-                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, y + 0.02f, tileZ + TILE_SIZE);
+                    float hStart = ResolveCornerHeight(heightCache, heightSettings, tile.x + 1, tile.y) + 0.02f;
+                    float hEnd = ResolveCornerHeight(heightCache, heightSettings, tile.x + 1, tile.y + 1) + 0.02f;
+                    Vector3 lineStart = new Vector3(tileX + TILE_SIZE, hStart, tileZ);
+                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, hEnd, tileZ + TILE_SIZE);
                     Handles.DrawLine(lineStart, lineEnd, borderThickness);
                 }
                 
                 // Bottom edge (z-)
                 if (tile.y <= 0 || !islandTiles.Contains(new Vector2Int(tile.x, tile.y - 1)))
                 {
-                    Vector3 lineStart = new Vector3(tileX, y + 0.02f, tileZ);
-                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, y + 0.02f, tileZ);
+                    float hStart = ResolveCornerHeight(heightCache, heightSettings, tile.x, tile.y) + 0.02f;
+                    float hEnd = ResolveCornerHeight(heightCache, heightSettings, tile.x + 1, tile.y) + 0.02f;
+                    Vector3 lineStart = new Vector3(tileX, hStart, tileZ);
+                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, hEnd, tileZ);
                     Handles.DrawLine(lineStart, lineEnd, borderThickness);
                 }
                 
                 // Left edge (x-)
                 if (tile.x <= 0 || !islandTiles.Contains(new Vector2Int(tile.x - 1, tile.y)))
                 {
-                    Vector3 lineStart = new Vector3(tileX, y + 0.02f, tileZ);
-                    Vector3 lineEnd = new Vector3(tileX, y + 0.02f, tileZ + TILE_SIZE);
+                    float hStart = ResolveCornerHeight(heightCache, heightSettings, tile.x, tile.y) + 0.02f;
+                    float hEnd = ResolveCornerHeight(heightCache, heightSettings, tile.x, tile.y + 1) + 0.02f;
+                    Vector3 lineStart = new Vector3(tileX, hStart, tileZ);
+                    Vector3 lineEnd = new Vector3(tileX, hEnd, tileZ + TILE_SIZE);
                     Handles.DrawLine(lineStart, lineEnd, borderThickness);
                 }
             }
@@ -2504,7 +3105,7 @@ namespace DivineDragon.MapTools
             }
         }
         
-        private static void DrawResizePreview(int currentWidth, int currentHeight, float startX, float startZ, float y)
+        private static void DrawResizePreview(int currentWidth, int currentHeight, float startX, float startZ, TerrainHeightCache heightCache, TerrainHeightSettings heightSettings)
         {
             if (selectedTerrain == null) return;
             
@@ -2525,8 +3126,10 @@ namespace DivineDragon.MapTools
                     {
                         float tileX = startX + col * TILE_SIZE;
                         float tileZ = startZ + row * TILE_SIZE;
-                        
-                        FillQuad(s_TileVerticesOverlay, tileX, tileZ, y, TILE_SIZE, 0.05f);
+                        int sampleCol = Mathf.Clamp(col, 0, Mathf.Max(currentWidth - 1, 0));
+                        int sampleRow = Mathf.Clamp(row, 0, Mathf.Max(currentHeight - 1, 0));
+                        float tileHeight = ResolveTileHeight(heightCache, heightSettings, sampleCol, sampleRow);
+                        FillTileQuad(s_TileVerticesOverlay, startX, startZ, col, row, heightCache, heightSettings, tileHeight, 0.05f);
                         Handles.DrawSolidRectangleWithOutline(s_TileVerticesOverlay, expandColor, Color.green);
                     }
                 }
@@ -2545,8 +3148,10 @@ namespace DivineDragon.MapTools
                         
                         float tileX = startX + col * TILE_SIZE;
                         float tileZ = startZ + row * TILE_SIZE;
-                        
-                        FillQuad(s_TileVerticesOverlay, tileX, tileZ, y, TILE_SIZE, 0.05f);
+                        int sampleCol = Mathf.Clamp(col, 0, Mathf.Max(currentWidth - 1, 0));
+                        int sampleRow = Mathf.Clamp(row, 0, Mathf.Max(currentHeight - 1, 0));
+                        float tileHeight = ResolveTileHeight(heightCache, heightSettings, sampleCol, sampleRow);
+                        FillTileQuad(s_TileVerticesOverlay, startX, startZ, col, row, heightCache, heightSettings, tileHeight, 0.05f);
                         Handles.DrawSolidRectangleWithOutline(s_TileVerticesOverlay, expandColor, Color.green);
                     }
                 }
@@ -2605,7 +3210,7 @@ namespace DivineDragon.MapTools
                 {
                     for (int col = 0; col < removeLeft; col++)
                     {
-                        DrawRemovalTile(col, row, startX, startZ, y, removeColor);
+                        DrawRemovalTile(col, row, startX, startZ, heightCache, heightSettings, removeColor);
                     }
                 }
             }
@@ -2617,7 +3222,7 @@ namespace DivineDragon.MapTools
                 {
                     for (int col = currentWidth - removeRight; col < currentWidth; col++)
                     {
-                        DrawRemovalTile(col, row, startX, startZ, y, removeColor);
+                        DrawRemovalTile(col, row, startX, startZ, heightCache, heightSettings, removeColor);
                     }
                 }
             }
@@ -2629,7 +3234,7 @@ namespace DivineDragon.MapTools
                 {
                     for (int col = removeLeft; col < currentWidth - removeRight; col++)
                     {
-                        DrawRemovalTile(col, row, startX, startZ, y, removeColor);
+                        DrawRemovalTile(col, row, startX, startZ, heightCache, heightSettings, removeColor);
                     }
                 }
             }
@@ -2641,14 +3246,14 @@ namespace DivineDragon.MapTools
                 {
                     for (int col = removeLeft; col < currentWidth - removeRight; col++)
                     {
-                        DrawRemovalTile(col, row, startX, startZ, y, removeColor);
+                        DrawRemovalTile(col, row, startX, startZ, heightCache, heightSettings, removeColor);
                     }
                 }
             }
             
             // Draw border around removal areas
             Handles.color = removeBorder;
-            float borderY = y + 0.08f;
+            float borderY = heightSettings.offset + 0.08f;
             
             // Left border
             if (removeLeft > 0)
@@ -2683,24 +3288,22 @@ namespace DivineDragon.MapTools
             }
         }
         
-        private static void DrawRemovalTile(int col, int row, float startX, float startZ, float y, Color color)
+        private static void DrawRemovalTile(int col, int row, float startX, float startZ, TerrainHeightCache heightCache, TerrainHeightSettings heightSettings, Color color)
         {
-            float tileX = startX + col * TILE_SIZE;
-            float tileZ = startZ + row * TILE_SIZE;
-            
-            FillQuad(s_TileVerticesOverlay, tileX, tileZ, y, TILE_SIZE, 0.07f);
+            float tileHeight = ResolveTileHeight(heightCache, heightSettings, col, row);
+            FillTileQuad(s_TileVerticesOverlay, startX, startZ, col, row, heightCache, heightSettings, tileHeight, 0.07f);
 
             Handles.DrawSolidRectangleWithOutline(s_TileVerticesOverlay, color, Color.clear);
             
             // Draw X pattern
             Handles.color = new Color(1f, 0f, 0f, 0.5f);
             Handles.DrawLine(
-                new Vector3(tileX, y + 0.08f, tileZ),
-                new Vector3(tileX + TILE_SIZE, y + 0.08f, tileZ + TILE_SIZE), 2f
+                new Vector3(startX + col * TILE_SIZE, tileHeight + 0.08f, startZ + row * TILE_SIZE),
+                new Vector3(startX + (col + 1) * TILE_SIZE, tileHeight + 0.08f, startZ + (row + 1) * TILE_SIZE), 2f
             );
             Handles.DrawLine(
-                new Vector3(tileX + TILE_SIZE, y + 0.08f, tileZ),
-                new Vector3(tileX, y + 0.08f, tileZ + TILE_SIZE), 2f
+                new Vector3(startX + (col + 1) * TILE_SIZE, tileHeight + 0.08f, startZ + row * TILE_SIZE),
+                new Vector3(startX + col * TILE_SIZE, tileHeight + 0.08f, startZ + (row + 1) * TILE_SIZE), 2f
             );
         }
         

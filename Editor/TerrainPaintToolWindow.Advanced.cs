@@ -712,7 +712,7 @@ namespace DivineDragon.MapTools
             }
         }
         
-        private static void DrawAdvancedOperationPreview(int width, int height, float startX, float startZ, float y)
+        private static void DrawAdvancedOperationPreview(int width, int height, float startX, float startZ, TerrainHeightCache heightCache, TerrainHeightSettings heightSettings)
         {
             if (previewTerrains == null || terrainDatabase == null) return;
             
@@ -728,10 +728,8 @@ namespace DivineDragon.MapTools
                     string terrainId = selectedTerrain.m_Terrains[index];
                     if (IsEmptyTerrain(terrainId) || terrainId == "MTID_Nothing") continue;
                     
-                    float tileX = startX + col * TILE_SIZE;
-                    float tileZ = startZ + row * TILE_SIZE;
-                    
-                    FillQuad(s_TileVerticesOverlay, tileX, tileZ, y, TILE_SIZE, 0.02f);
+                    float tileHeight = ResolveTileHeight(heightCache, heightSettings, col, row);
+                    FillTileQuad(s_TileVerticesOverlay, startX, startZ, col, row, heightCache, heightSettings, tileHeight, 0.02f);
 
                     Handles.DrawSolidRectangleWithOutline(s_TileVerticesOverlay, currentColor, Color.clear);
                 }
@@ -748,14 +746,13 @@ namespace DivineDragon.MapTools
                     string terrainId = previewTerrains[index];
                     if (IsEmptyTerrain(terrainId) || terrainId == "MTID_Nothing") continue;
                     
-                    float tileX = startX + col * TILE_SIZE;
-                    float tileZ = startZ + row * TILE_SIZE;
+                    float tileHeight = ResolveTileHeight(heightCache, heightSettings, col, row);
                     
                     // Get color from terrain database
                     Color tileColor = GetBaseTerrainColor(terrainId);
                     tileColor.a = 0.6f; // Make semi-transparent
 
-                    FillQuad(s_TileVerticesOverlay, tileX, tileZ, y, TILE_SIZE, 0.04f);
+                    FillTileQuad(s_TileVerticesOverlay, startX, startZ, col, row, heightCache, heightSettings, tileHeight, 0.04f);
 
                     Handles.DrawSolidRectangleWithOutline(s_TileVerticesOverlay, tileColor, Color.blue);
                 }
