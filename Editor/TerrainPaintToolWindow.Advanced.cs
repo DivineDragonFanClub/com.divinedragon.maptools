@@ -731,20 +731,13 @@ namespace DivineDragon.MapTools
                     float tileX = startX + col * TILE_SIZE;
                     float tileZ = startZ + row * TILE_SIZE;
                     
-                    Vector3[] verts = new Vector3[]
-                    {
-                        new Vector3(tileX, y + 0.02f, tileZ),
-                        new Vector3(tileX + TILE_SIZE, y + 0.02f, tileZ),
-                        new Vector3(tileX + TILE_SIZE, y + 0.02f, tileZ + TILE_SIZE),
-                        new Vector3(tileX, y + 0.02f, tileZ + TILE_SIZE)
-                    };
-                    
-                    Handles.DrawSolidRectangleWithOutline(verts, currentColor, Color.clear);
+                    FillQuad(s_TileVerticesOverlay, tileX, tileZ, y, TILE_SIZE, 0.02f);
+
+                    Handles.DrawSolidRectangleWithOutline(s_TileVerticesOverlay, currentColor, Color.clear);
                 }
             }
             
             // Draw preview terrain in semi-transparent blue
-            Color previewColor = new Color(0f, 0.5f, 1f, 0.5f);
             for (int row = 0; row < height; row++)
             {
                 for (int col = 0; col < width; col++)
@@ -759,18 +752,12 @@ namespace DivineDragon.MapTools
                     float tileZ = startZ + row * TILE_SIZE;
                     
                     // Get color from terrain database
-                    Color tileColor = terrainDatabase.GetTerrainColor(terrainId, previewColor);
+                    Color tileColor = GetBaseTerrainColor(terrainId);
                     tileColor.a = 0.6f; // Make semi-transparent
-                    
-                    Vector3[] verts = new Vector3[]
-                    {
-                        new Vector3(tileX, y + 0.04f, tileZ),
-                        new Vector3(tileX + TILE_SIZE, y + 0.04f, tileZ),
-                        new Vector3(tileX + TILE_SIZE, y + 0.04f, tileZ + TILE_SIZE),
-                        new Vector3(tileX, y + 0.04f, tileZ + TILE_SIZE)
-                    };
-                    
-                    Handles.DrawSolidRectangleWithOutline(verts, tileColor, Color.blue);
+
+                    FillQuad(s_TileVerticesOverlay, tileX, tileZ, y, TILE_SIZE, 0.04f);
+
+                    Handles.DrawSolidRectangleWithOutline(s_TileVerticesOverlay, tileColor, Color.blue);
                 }
             }
         }

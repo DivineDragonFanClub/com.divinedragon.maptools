@@ -26,13 +26,25 @@ namespace DivineDragon.MapTools
         public List<Vector2Int> tiles;
         public Vector2 center;
         public List<Vector2> labelPositions;
+        private readonly HashSet<Vector2Int> tileLookup;
         
         public TerrainIsland(string id)
         {
             terrainId = id;
             tiles = new List<Vector2Int>();
             labelPositions = new List<Vector2>();
+            tileLookup = new HashSet<Vector2Int>();
         }
+
+        public void AddTile(Vector2Int tile)
+        {
+            tiles.Add(tile);
+            tileLookup.Add(tile);
+        }
+
+        public bool ContainsTile(Vector2Int tile) => tileLookup.Contains(tile);
+
+        public HashSet<Vector2Int> TileSet => tileLookup;
         
         public void CalculateCenter()
         {
@@ -60,7 +72,7 @@ namespace DivineDragon.MapTools
             // Check if the center of mass actually falls within our tiles
             // This handles cases like sea that surrounds land
             Vector2Int centerInt = new Vector2Int(Mathf.RoundToInt(center.x), Mathf.RoundToInt(center.y));
-            bool centerIsInTiles = tiles.Contains(centerInt);
+            bool centerIsInTiles = tileLookup.Contains(centerInt);
             
             // Also check nearby tiles in case of rounding issues
             if (!centerIsInTiles)
@@ -70,7 +82,7 @@ namespace DivineDragon.MapTools
                     for (int dy = -1; dy <= 1; dy++)
                     {
                         Vector2Int checkPos = new Vector2Int(centerInt.x + dx, centerInt.y + dy);
-                        if (tiles.Contains(checkPos))
+                        if (tileLookup.Contains(checkPos))
                         {
                             centerIsInTiles = true;
                             break;
@@ -120,7 +132,7 @@ namespace DivineDragon.MapTools
                 
                 foreach (var candidate in candidatePositions)
                 {
-                    if (!tiles.Contains(candidate)) continue;
+                    if (!tileLookup.Contains(candidate)) continue;
                     
                     // Count tiles in a 5x5 area around this candidate
                     int neighborCount = 0;
@@ -129,7 +141,7 @@ namespace DivineDragon.MapTools
                         for (int dy = -2; dy <= 2; dy++)
                         {
                             Vector2Int checkPos = new Vector2Int(candidate.x + dx, candidate.y + dy);
-                            if (tiles.Contains(checkPos))
+                            if (tileLookup.Contains(checkPos))
                             {
                                 neighborCount++;
                             }
@@ -301,10 +313,11 @@ namespace DivineDragon.MapTools
             {
                 terrainDatabase = null;
                 Debug.LogWarning($"No terrain definitions loaded. Extract terrain.xml.bundle so that '{TerrainTypeDatabase.TerrainXmlAssetRelativePath}' is available.");
+                InvalidateTerrainCaches();
                 return;
             }
 
-            terrainColorCache.Clear();
+            InvalidateTerrainCaches();
 
             if (IsEmptyTerrain(selectedBrushTerrain))
             {
@@ -351,14 +364,66 @@ namespace DivineDragon.MapTools
         {
             if ((!checkDisplayMode || displayMode == DisplayMode.Both) && terrainDatabase != null)
             {
-                if (!terrainColorCache.TryGetValue(terrainId, out Color tileColor))
-                {
-                    tileColor = terrainDatabase.GetTerrainColor(terrainId, Color.gray);
-                    terrainColorCache[terrainId] = tileColor;
-                }
-                return GetContrastColor(tileColor);
+                return GetContrastColor(GetBaseTerrainColor(terrainId));
             }
             return textColor;
+        }
+
+        private static void InvalidateTerrainCaches()
+        {
+            terrainColorCache.Clear();
+            paintableTerrainsDirty = true;
+        }
+
+        internal static void NotifyTerrainDatabaseChanged()
+        {
+            InvalidateTerrainCaches();
+            if (instance != null)
+            {
+                instance.Repaint();
+            }
+            SceneView.RepaintAll();
+        }
+
+        private static Color GetBaseTerrainColor(string terrainId)
+        {
+            if (terrainDatabase == null || string.IsNullOrEmpty(terrainId))
+            {
+                return Color.gray;
+            }
+
+            if (!terrainColorCache.TryGetValue(terrainId, out Color baseColor))
+            {
+                baseColor = terrainDatabase.GetTerrainColor(terrainId, Color.gray);
+                terrainColorCache[terrainId] = baseColor;
+            }
+
+            return baseColor;
+        }
+
+        private static Color GetTileFillColor(string terrainId)
+        {
+            Color color = GetBaseTerrainColor(terrainId);
+            color.r = Mathf.Clamp01(color.r * colorBrightness);
+            color.g = Mathf.Clamp01(color.g * colorBrightness);
+            color.b = Mathf.Clamp01(color.b * colorBrightness);
+            color.a = colorOpacity;
+            return color;
+        }
+
+        private static Color GetBorderColor(string terrainId)
+        {
+            Color color = GetTileFillColor(terrainId);
+            return new Color(color.r * 0.6f, color.g * 0.6f, color.b * 0.6f, 1f);
+        }
+
+        private static void FillQuad(Vector3[] buffer, float x, float z, float y, float size = TILE_SIZE, float yOffset = 0f)
+        {
+            float baseY = y + yOffset;
+            buffer[0] = new Vector3(x, baseY, z);
+            buffer[1] = new Vector3(x + size, baseY, z);
+            buffer[2] = new Vector3(x + size, baseY, z + size);
+            buffer[3] = new Vector3(x, baseY, z + size);
         }
 
         // Modifier detection for sampling (support Ctrl and Cmd)
@@ -398,6 +463,14 @@ namespace DivineDragon.MapTools
 
         // Per-session caches
         private static readonly Dictionary<string, Color> terrainColorCache = new Dictionary<string, Color>();
+        private static readonly List<TerrainType> paintableTerrainsCache = new List<TerrainType>();
+        private static bool paintableTerrainsDirty = true;
+        private static readonly Dictionary<string, string> s_LabelTextCache = new Dictionary<string, string>(64);
+        private static readonly HashSet<string> s_LabelFrameKeys = new HashSet<string>();
+        private static readonly List<LabelNode> s_FrameLabelNodes = new List<LabelNode>(64);
+        private static readonly List<string> s_LabelRemovalBuffer = new List<string>(32);
+        private static readonly Vector3[] s_TileVertices = new Vector3[4];
+        private static readonly Vector3[] s_TileVerticesOverlay = new Vector3[4];
         private static GUIContent s_LabelContent = new GUIContent();
         private static System.Collections.Generic.Dictionary<string,float> labelAlphaStates = new System.Collections.Generic.Dictionary<string,float>();
         
@@ -702,7 +775,7 @@ namespace DivineDragon.MapTools
                         {
                             if (terrainDatabase != null)
                             {
-                                Color hColor = terrainDatabase.GetTerrainColor(hoveredIdForPanel, Color.gray);
+                                Color hColor = GetBaseTerrainColor(hoveredIdForPanel);
                                 Rect colorRectH = GUILayoutUtility.GetRect(20, 20, GUILayout.Width(20));
                                 EditorGUI.DrawRect(colorRectH, hColor);
                                 EditorGUI.DrawRect(colorRectH, new Color(0, 0, 0, 0.2f));
@@ -739,7 +812,7 @@ namespace DivineDragon.MapTools
                         // Draw color chip
                         if (terrainDatabase != null)
                         {
-                            Color terrainColor = terrainDatabase.GetTerrainColor(selectedBrushTerrain, Color.gray);
+                            Color terrainColor = GetBaseTerrainColor(selectedBrushTerrain);
                             Rect colorRect = GUILayoutUtility.GetRect(20, 20, GUILayout.Width(20));
                             EditorGUI.DrawRect(colorRect, terrainColor);
                             EditorGUI.DrawRect(colorRect, new Color(0, 0, 0, 0.2f)); // Border
@@ -940,21 +1013,9 @@ namespace DivineDragon.MapTools
                         float tileX = startX + col * TILE_SIZE;
                         float tileZ = startZ + row * TILE_SIZE;
 
-                        Vector3[] verts = new Vector3[]
-                        {
-                            new Vector3(tileX, y, tileZ),
-                            new Vector3(tileX + TILE_SIZE, y, tileZ),
-                            new Vector3(tileX + TILE_SIZE, y, tileZ + TILE_SIZE),
-                            new Vector3(tileX, y, tileZ + TILE_SIZE)
-                        };
-
-                        Color tileColor = terrainDatabase.GetTerrainColor(terrainId, Color.gray);
-                        tileColor.r = Mathf.Clamp01(tileColor.r * colorBrightness);
-                        tileColor.g = Mathf.Clamp01(tileColor.g * colorBrightness);
-                        tileColor.b = Mathf.Clamp01(tileColor.b * colorBrightness);
-                        tileColor.a = colorOpacity;
-
-                        Handles.DrawSolidRectangleWithOutline(verts, tileColor, Color.clear);
+                        FillQuad(s_TileVertices, tileX, tileZ, y);
+                        Color tileColor = GetTileFillColor(terrainId);
+                        Handles.DrawSolidRectangleWithOutline(s_TileVertices, tileColor, Color.clear);
                     }
                 }
             }
@@ -983,8 +1044,7 @@ namespace DivineDragon.MapTools
                 {
                     if (IsEmptyTerrain(island.terrainId))
                         continue;
-                    Color baseColor = terrainDatabase.GetTerrainColor(island.terrainId, Color.gray);
-                    Color borderColor = new Color(baseColor.r * 0.6f, baseColor.g * 0.6f, baseColor.b * 0.6f, 1f);
+                    Color borderColor = GetBorderColor(island.terrainId);
                     DrawIslandBorders(island, width, height, startX, startZ, y, borderColor);
                 }
             }
@@ -1071,21 +1131,21 @@ namespace DivineDragon.MapTools
                 s_LabelStyleHover.fontStyle = FontStyle.Bold;
                 s_LabelStyleHover.fontSize = hoverFont;
 
-                var frameTextCache = new Dictionary<string, string>(64);
+                s_LabelTextCache.Clear();
+                s_LabelFrameKeys.Clear();
+                s_FrameLabelNodes.Clear();
+                s_LabelRemovalBuffer.Clear();
 
                 if (allowAnyLabels)
                 {
                     List<TerrainIsland> islands = GetOrCreateIslands(selectedTerrain, cameraDistance);
                     Handles.BeginGUI();
 
-                    var usedKeys = new HashSet<string>();
-                    var frameNodes = new List<LabelNode>(64);
-
                     foreach (var island in islands)
                     {
                         if (IsEmptyTerrain(island.terrainId))
                             continue;
-                        if (showHoverLabel && island.tiles.Contains(hoveredTile))
+                        if (showHoverLabel && island.ContainsTile(hoveredTile))
                             continue;
 
                         foreach (var labelPos in island.labelPositions)
@@ -1095,10 +1155,10 @@ namespace DivineDragon.MapTools
                             Vector3 worldPos = new Vector3(centerX, y, centerZ);
 
                             string textKey = island.terrainId + "|" + textDisplayMode;
-                            if (!frameTextCache.TryGetValue(textKey, out string displayText))
+                            if (!s_LabelTextCache.TryGetValue(textKey, out string displayText))
                             {
                                 displayText = GetTerrainDisplayText(island.terrainId);
-                                frameTextCache[textKey] = displayText;
+                                s_LabelTextCache[textKey] = displayText;
                             }
 
                             Color labelColor = ResolveLabelColor(island.terrainId);
@@ -1113,7 +1173,7 @@ namespace DivineDragon.MapTools
                             float totalHeight = size.y;
 
                             string nodeKey = island.terrainId + "|" + Mathf.RoundToInt(labelPos.x) + "x" + Mathf.RoundToInt(labelPos.y) + "|" + (int)textDisplayMode;
-                            usedKeys.Add(nodeKey);
+                            s_LabelFrameKeys.Add(nodeKey);
                             bool nodeExisted = s_LabelNodes.TryGetValue(nodeKey, out var node);
                             if (!nodeExisted)
                             {
@@ -1131,20 +1191,20 @@ namespace DivineDragon.MapTools
                             {
                                 node.priority = island.tiles.Count >= relaxLargeIslandTiles ? relaxPriorityLarge : 1f;
                                 node.preservedOffset = prevOffset;
-                                frameNodes.Add(node);
+                                s_FrameLabelNodes.Add(node);
                             }
                         }
                     }
 
                     if (relaxEnabled)
                     {
-                        RelaxLabelPositions(frameNodes, deltaTime, justStartedMoving, cameraIsMoving, cameraDistance, width, height);
+                        RelaxLabelPositions(s_FrameLabelNodes, deltaTime, justStartedMoving, cameraIsMoving, cameraDistance, width, height);
                     }
 
                     foreach (var island in islands)
                     {
                         if (IsEmptyTerrain(island.terrainId)) continue;
-                        if (showHoverLabel && island.tiles.Contains(hoveredTile)) continue;
+                        if (showHoverLabel && island.ContainsTile(hoveredTile)) continue;
 
                         foreach (var labelPos in island.labelPositions)
                         {
@@ -1153,10 +1213,10 @@ namespace DivineDragon.MapTools
                             Vector3 worldPos = new Vector3(centerX, y, centerZ);
 
                             string textKey = island.terrainId + "|" + textDisplayMode;
-                            if (!frameTextCache.TryGetValue(textKey, out string displayText))
+                            if (!s_LabelTextCache.TryGetValue(textKey, out string displayText))
                             {
                                 displayText = GetTerrainDisplayText(island.terrainId);
-                                frameTextCache[textKey] = displayText;
+                                s_LabelTextCache[textKey] = displayText;
                             }
                             Color labelColor = ResolveLabelColor(island.terrainId);
                             if (displayMode == DisplayMode.ColorOnly) continue;
@@ -1176,13 +1236,25 @@ namespace DivineDragon.MapTools
                         }
                     }
 
-                    foreach (var kv in s_LabelNodes.ToList())
+                    foreach (var kv in s_LabelNodes)
                     {
-                        if (!usedKeys.Contains(kv.Key))
-                            s_LabelNodes.Remove(kv.Key);
+                        if (!s_LabelFrameKeys.Contains(kv.Key))
+                        {
+                            s_LabelRemovalBuffer.Add(kv.Key);
+                        }
                         else
+                        {
                             kv.Value.seenThisFrame = false;
+                        }
                     }
+
+                    for (int i = 0; i < s_LabelRemovalBuffer.Count; i++)
+                    {
+                        s_LabelNodes.Remove(s_LabelRemovalBuffer[i]);
+                    }
+                    s_LabelFrameKeys.Clear();
+                    s_FrameLabelNodes.Clear();
+                    s_LabelRemovalBuffer.Clear();
 
                     Handles.EndGUI();
                 }
@@ -1516,14 +1588,8 @@ namespace DivineDragon.MapTools
                 float worldX = startX + centerTile.x * TILE_SIZE;
                 float worldZ = startZ + centerTile.y * TILE_SIZE;
                 
-                Vector3[] verts = new Vector3[]
-                {
-                    new Vector3(worldX, y + 0.05f, worldZ),
-                    new Vector3(worldX + TILE_SIZE, y + 0.05f, worldZ),
-                    new Vector3(worldX + TILE_SIZE, y + 0.05f, worldZ + TILE_SIZE),
-                    new Vector3(worldX, y + 0.05f, worldZ + TILE_SIZE)
-                };
-                
+                FillQuad(s_TileVerticesOverlay, worldX, worldZ, y, TILE_SIZE, 0.05f);
+
                 // Get the actual terrain color at the hovered tile
                 // This should match EXACTLY how the tiles are displayed on the map (with brightness adjustment)
                 Color sampleColor = Color.gray;
@@ -1540,7 +1606,7 @@ namespace DivineDragon.MapTools
                             if (!IsEmptyTerrain(terrainToSample))
                             {
                                 // Get base color from database
-                                Color terrainColor = terrainDatabase.GetTerrainColor(terrainToSample, Color.gray);
+                                Color terrainColor = GetBaseTerrainColor(terrainToSample);
 
                                 // Apply brightness adjustment (same as actual tile rendering)
                                 terrainColor.r = Mathf.Clamp01(terrainColor.r * colorBrightness);
@@ -1560,7 +1626,7 @@ namespace DivineDragon.MapTools
                         }
                     }
                 }
-                Handles.DrawSolidRectangleWithOutline(verts, sampleColor, sampleOutline);
+                Handles.DrawSolidRectangleWithOutline(s_TileVerticesOverlay, sampleColor, sampleOutline);
                 
                 // Draw "Sample" text over the tile
                 Vector3 tileCenter = new Vector3(worldX + TILE_SIZE * 0.5f, y + 0.1f, worldZ + TILE_SIZE * 0.5f);
@@ -1605,27 +1671,22 @@ namespace DivineDragon.MapTools
                 else
                 {
                     // Get the actual color of the terrain we're painting
-                    Color terrainColor = terrainDatabase.GetTerrainColor(selectedBrushTerrain, Color.gray);
-                    
-                    // Apply brightness adjustment (same as actual tile rendering)
-                    terrainColor.r = Mathf.Clamp01(terrainColor.r * colorBrightness);
-                    terrainColor.g = Mathf.Clamp01(terrainColor.g * colorBrightness);
-                    terrainColor.b = Mathf.Clamp01(terrainColor.b * colorBrightness);
-                    
+                    Color adjustedColor = GetTileFillColor(selectedBrushTerrain);
+
                     // Make it semi-transparent for preview
-                    Color previewColor = new Color(terrainColor.r, terrainColor.g, terrainColor.b, 0.4f);
-                    
+                    Color previewColor = new Color(adjustedColor.r, adjustedColor.g, adjustedColor.b, 0.4f);
+
                     // Darken the adjusted color for the outline
                     Color outlineColor = new Color(
-                        terrainColor.r * 0.6f,
-                        terrainColor.g * 0.6f,
-                        terrainColor.b * 0.6f,
+                        adjustedColor.r * 0.6f,
+                        adjustedColor.g * 0.6f,
+                        adjustedColor.b * 0.6f,
                         0.8f
                     );
-                    
+
                     // Draw the preview tiles
                     DrawBrushTiles(centerTile, width, height, startX, startZ, y, previewColor, outlineColor);
-                    
+
                     // Draw preview borders for the new terrain
                     DrawPreviewBorders(centerTile, width, height, startX, startZ, y, outlineColor);
                 }
@@ -1663,16 +1724,10 @@ namespace DivineDragon.MapTools
 
                         float worldX = startX + tileX * TILE_SIZE;
                         float worldZ = startZ + tileZ * TILE_SIZE;
-                        
-                        Vector3[] verts = new Vector3[]
-                        {
-                            new Vector3(worldX, y + 0.05f, worldZ),
-                            new Vector3(worldX + TILE_SIZE, y + 0.05f, worldZ),
-                            new Vector3(worldX + TILE_SIZE, y + 0.05f, worldZ + TILE_SIZE),
-                            new Vector3(worldX, y + 0.05f, worldZ + TILE_SIZE)
-                        };
-                        
-                        Handles.DrawSolidRectangleWithOutline(verts, fillColor, outlineColor);
+
+                        FillQuad(s_TileVerticesOverlay, worldX, worldZ, y, TILE_SIZE, 0.05f);
+
+                        Handles.DrawSolidRectangleWithOutline(s_TileVerticesOverlay, fillColor, outlineColor);
                     }
                 }
             }
@@ -1842,7 +1897,7 @@ namespace DivineDragon.MapTools
             bool isDarkTerrain = false;
             if (!string.IsNullOrEmpty(terrainId) && terrainDatabase != null)
             {
-                baseColor = terrainDatabase.GetTerrainColor(terrainId, Color.gray);
+                baseColor = GetBaseTerrainColor(terrainId);
                 // Calculate perceived brightness
                 float brightness = baseColor.r * 0.299f + baseColor.g * 0.587f + baseColor.b * 0.114f;
                 isDarkTerrain = brightness < 0.4f;
@@ -2009,7 +2064,7 @@ namespace DivineDragon.MapTools
             // Draw colored icon
             if (terrainDatabase != null)
             {
-                Color terrainColor = terrainDatabase.GetTerrainColor(terrainId, Color.gray);
+                Color terrainColor = GetBaseTerrainColor(terrainId);
                 Rect iconRect = new Rect(labelRect.x + iconPadding, 
                     labelRect.y + (labelRect.height - iconSize) / 2, iconSize, iconSize);
                 
@@ -2102,7 +2157,7 @@ namespace DivineDragon.MapTools
             // Icon
             if (terrainDatabase != null)
             {
-                Color terrainColor = terrainDatabase.GetTerrainColor(terrainId, Color.gray);
+                Color terrainColor = GetBaseTerrainColor(terrainId);
                 Rect iconRect = new Rect(labelRect.x + iconPadding,
                                          labelRect.y + (labelRect.height - iconSize) / 2,
                                          iconSize, iconSize);
@@ -2128,10 +2183,8 @@ namespace DivineDragon.MapTools
         {
             Handles.color = borderColor;
             float borderThickness = 3f;
-            
-            // Create a set for quick lookup
-            HashSet<Vector2Int> islandTiles = new HashSet<Vector2Int>(island.tiles);
-            
+            var islandTiles = island.TileSet;
+
             // Check each tile in the island for border edges
             foreach (var tile in island.tiles)
             {
@@ -2244,7 +2297,7 @@ namespace DivineDragon.MapTools
                         while (queue.Count > 0)
                         {
                             Vector2Int current = queue.Dequeue();
-                            island.tiles.Add(current);
+                            island.AddTile(current);
                             
                             // Check 4 neighbors
                             foreach (var dir in Directions4)
@@ -2339,15 +2392,8 @@ namespace DivineDragon.MapTools
                         float tileX = startX + col * TILE_SIZE;
                         float tileZ = startZ + row * TILE_SIZE;
                         
-                        Vector3[] verts = new Vector3[]
-                        {
-                            new Vector3(tileX, y + 0.05f, tileZ),
-                            new Vector3(tileX + TILE_SIZE, y + 0.05f, tileZ),
-                            new Vector3(tileX + TILE_SIZE, y + 0.05f, tileZ + TILE_SIZE),
-                            new Vector3(tileX, y + 0.05f, tileZ + TILE_SIZE)
-                        };
-                        
-                        Handles.DrawSolidRectangleWithOutline(verts, expandColor, Color.green);
+                        FillQuad(s_TileVerticesOverlay, tileX, tileZ, y, TILE_SIZE, 0.05f);
+                        Handles.DrawSolidRectangleWithOutline(s_TileVerticesOverlay, expandColor, Color.green);
                     }
                 }
             }
@@ -2366,15 +2412,8 @@ namespace DivineDragon.MapTools
                         float tileX = startX + col * TILE_SIZE;
                         float tileZ = startZ + row * TILE_SIZE;
                         
-                        Vector3[] verts = new Vector3[]
-                        {
-                            new Vector3(tileX, y + 0.05f, tileZ),
-                            new Vector3(tileX + TILE_SIZE, y + 0.05f, tileZ),
-                            new Vector3(tileX + TILE_SIZE, y + 0.05f, tileZ + TILE_SIZE),
-                            new Vector3(tileX, y + 0.05f, tileZ + TILE_SIZE)
-                        };
-                        
-                        Handles.DrawSolidRectangleWithOutline(verts, expandColor, Color.green);
+                        FillQuad(s_TileVerticesOverlay, tileX, tileZ, y, TILE_SIZE, 0.05f);
+                        Handles.DrawSolidRectangleWithOutline(s_TileVerticesOverlay, expandColor, Color.green);
                     }
                 }
             }
@@ -2515,15 +2554,9 @@ namespace DivineDragon.MapTools
             float tileX = startX + col * TILE_SIZE;
             float tileZ = startZ + row * TILE_SIZE;
             
-            Vector3[] verts = new Vector3[]
-            {
-                new Vector3(tileX, y + 0.07f, tileZ),
-                new Vector3(tileX + TILE_SIZE, y + 0.07f, tileZ),
-                new Vector3(tileX + TILE_SIZE, y + 0.07f, tileZ + TILE_SIZE),
-                new Vector3(tileX, y + 0.07f, tileZ + TILE_SIZE)
-            };
-            
-            Handles.DrawSolidRectangleWithOutline(verts, color, Color.clear);
+            FillQuad(s_TileVerticesOverlay, tileX, tileZ, y, TILE_SIZE, 0.07f);
+
+            Handles.DrawSolidRectangleWithOutline(s_TileVerticesOverlay, color, Color.clear);
             
             // Draw X pattern
             Handles.color = new Color(1f, 0f, 0f, 0.5f);
@@ -2583,12 +2616,27 @@ namespace DivineDragon.MapTools
         {
             if (terrainDatabase == null)
             {
-                return new List<TerrainType>();
+                paintableTerrainsCache.Clear();
+                paintableTerrainsDirty = true;
+                return paintableTerrainsCache;
             }
 
-            var terrains = terrainDatabase.GetAllTerrainTypes();
-            terrains.RemoveAll(t => IsEmptyTerrain(t.tid));
-            return terrains;
+            if (paintableTerrainsDirty)
+            {
+                paintableTerrainsCache.Clear();
+                var allTypes = terrainDatabase.GetAllTerrainTypes();
+                for (int i = 0; i < allTypes.Count; i++)
+                {
+                    var terrain = allTypes[i];
+                    if (!IsEmptyTerrain(terrain.tid))
+                    {
+                        paintableTerrainsCache.Add(terrain);
+                    }
+                }
+                paintableTerrainsDirty = false;
+            }
+
+            return paintableTerrainsCache;
         }
 
         // Reusable GUI styles

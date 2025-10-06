@@ -70,6 +70,7 @@ namespace DivineDragon.MapTools
                 AssetDatabase.SaveAssets();
             }
             needsReload = false;
+            TerrainPaintToolWindow.NotifyTerrainDatabaseChanged();
         }
 
         private void RebuildLookup()
@@ -220,6 +221,7 @@ namespace DivineDragon.MapTools
         {
             needsReload = true;
             warnedMissingXml = false;
+            TerrainPaintToolWindow.NotifyTerrainDatabaseChanged();
 
             if (instance != null)
             {
