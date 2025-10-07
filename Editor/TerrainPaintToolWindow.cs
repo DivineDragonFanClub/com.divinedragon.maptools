@@ -316,6 +316,8 @@ namespace DivineDragon.MapTools
             TerrainRegionCache.ClearAll();
             sceneColliderCache.Clear();
             InvalidateSceneColliderLists();
+            InvalidateOverlayMesh(null);
+            InvalidateGridMesh(null);
             SceneView.RepaintAll();
             if (instance != null)
             {
