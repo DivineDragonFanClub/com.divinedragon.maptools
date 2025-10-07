@@ -191,86 +191,7 @@ namespace DivineDragon.MapTools
         private static float currentGridThicknessWorld = 0.01f;
         private static Vector3 worldOffset = Vector3.zero;
 
-        private enum TerrainHeightMode
-        {
-            FixedOffset,
-            RaycastMesh
-        }
-
-        private class TerrainHeightSettings
-        {
-            public float offset;
-            public TerrainHeightMode mode;
-            public bool autoSelectCollider = true;
-            public string colliderPath = string.Empty;
-        }
-
-        private class TerrainHeightCache
-        {
-            public TerrainHeightMode mode;
-            public int width;
-            public int height;
-            public float originX;
-            public float originZ;
-            public float offsetX;
-            public float offsetZ;
-            public string sceneKey;
-            public float[] centerSamples;
-            public float[] cornerSamples;
-            public bool anyCenterHits;
-            public bool anyCornerHits;
-            public bool autoSelection;
-            public string colliderPath;
-            public string requestedColliderPath;
-        }
-
-        private class OverlayMeshData
-        {
-            public Mesh mesh;
-            public Vector3[] vertices;
-            public Color[] colors;
-            public int[] indices;
-            public TerrainHeightCache heightCache;
-            public TerrainHeightMode heightMode;
-            public float offsetX;
-            public float offsetZ;
-            public string sceneKey;
-            public int width;
-            public int height;
-            public float colorOpacity;
-            public float colorBrightness;
-            public DisplayMode displayMode;
-            public string colliderPath;
-            public float fixedOffset;
-        }
-
-        private class GridMeshData
-        {
-            public Mesh mesh;
-            public Vector3[] vertices;
-            public Color[] colors;
-            public int[] indices;
-            public TerrainHeightCache heightCache;
-            public TerrainHeightMode heightMode;
-            public float offsetX;
-            public float offsetZ;
-            public string sceneKey;
-            public int width;
-            public int height;
-            public string colliderPath;
-            public float fixedOffset;
-            public float pixelThickness;
-            public float worldThickness;
-            public Color color;
-        }
-
-        private static readonly Dictionary<string, TerrainHeightSettings> terrainHeightSettings = new Dictionary<string, TerrainHeightSettings>(StringComparer.OrdinalIgnoreCase);
-        private static readonly Dictionary<TerrainAssetAdapter, TerrainHeightCache> terrainHeightCache = new Dictionary<TerrainAssetAdapter, TerrainHeightCache>();
-        private static readonly Dictionary<TerrainAssetAdapter, OverlayMeshData> overlayMeshCache = new Dictionary<TerrainAssetAdapter, OverlayMeshData>();
-        private static readonly Dictionary<TerrainAssetAdapter, GridMeshData> gridMeshCache = new Dictionary<TerrainAssetAdapter, GridMeshData>();
         private static readonly Dictionary<string, MeshCollider> sceneColliderCache = new Dictionary<string, MeshCollider>(StringComparer.OrdinalIgnoreCase);
-        private static readonly List<TerrainAssetAdapter> meshCacheRemovalBuffer = new List<TerrainAssetAdapter>();
-        private static Material overlayMaterial;
         private static readonly HashSet<string> loggedRaycastFailures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static readonly List<string> raycastLogRemovalBuffer = new List<string>();
         private static bool terrainHeightPrefsLoaded = false;
@@ -376,6 +297,9 @@ namespace DivineDragon.MapTools
             Undo.undoRedoPerformed += OnUndoRedo;
             EditorSceneManager.activeSceneChangedInEditMode -= OnActiveSceneChanged;
             EditorSceneManager.activeSceneChangedInEditMode += OnActiveSceneChanged;
+            EditorApplication.hierarchyChanged -= OnHierarchyChanged;
+            EditorApplication.hierarchyChanged += OnHierarchyChanged;
+            InvalidateSceneColliderLists();
             LoadSettings();
             RefreshTerrainList();
             LoadTerrainDatabase();
@@ -390,6 +314,8 @@ namespace DivineDragon.MapTools
             s_LabelNodes.Clear();
             TerrainVirtualGridCache.ClearAll();
             TerrainRegionCache.ClearAll();
+            sceneColliderCache.Clear();
+            InvalidateSceneColliderLists();
             SceneView.RepaintAll();
             if (instance != null)
             {
@@ -460,1295 +386,6 @@ namespace DivineDragon.MapTools
             return textColor;
         }
 
-        private static void InvalidateTerrainCaches()
-        {
-            terrainColorCache.Clear();
-            paintableTerrainsDirty = true;
-            InvalidateTerrainHeightCache(null);
-            InvalidateOverlayMesh(null);
-            InvalidateGridMesh(null);
-        }
-
-        private static void RemoveRaycastFailureEntries(string assetPath)
-        {
-            if (string.IsNullOrEmpty(assetPath))
-            {
-                return;
-            }
-
-            raycastLogRemovalBuffer.Clear();
-            foreach (string key in loggedRaycastFailures)
-            {
-                string[] parts = key.Split('|');
-                if (parts.Length >= 2 && string.Equals(parts[1], assetPath, StringComparison.OrdinalIgnoreCase))
-                {
-                    raycastLogRemovalBuffer.Add(key);
-                }
-            }
-
-            foreach (string key in raycastLogRemovalBuffer)
-            {
-                loggedRaycastFailures.Remove(key);
-            }
-        }
-        private static void InvalidateOverlayMesh(TerrainAssetAdapter terrain)
-        {
-            if (terrain == null)
-            {
-                DisposeOverlayMeshes();
-                return;
-            }
-
-            if (overlayMeshCache.TryGetValue(terrain, out var data))
-            {
-                if (data.mesh != null)
-                {
-                    UnityEngine.Object.DestroyImmediate(data.mesh);
-                }
-                overlayMeshCache.Remove(terrain);
-            }
-        }
-
-        private static void DisposeOverlayMeshes()
-        {
-            foreach (var kv in overlayMeshCache)
-            {
-                if (kv.Value.mesh != null)
-                {
-                    UnityEngine.Object.DestroyImmediate(kv.Value.mesh);
-                }
-            }
-            overlayMeshCache.Clear();
-        }
-
-        private static void EnsureOverlayMaterial()
-        {
-            if (overlayMaterial != null)
-            {
-                return;
-            }
-
-            Shader shader = Shader.Find("Hidden/Internal-Colored");
-            if (shader == null)
-            {
-                shader = Shader.Find("Sprites/Default");
-            }
-
-            overlayMaterial = new Material(shader) { hideFlags = HideFlags.HideAndDontSave };
-            overlayMaterial.SetInt("_SrcBlend", (int)BlendMode.SrcAlpha);
-            overlayMaterial.SetInt("_DstBlend", (int)BlendMode.OneMinusSrcAlpha);
-            overlayMaterial.SetInt("_Cull", (int)CullMode.Off);
-            overlayMaterial.SetInt("_ZWrite", 0);
-            overlayMaterial.SetInt("_ZTest", (int)CompareFunction.Always);
-        }
-
-        private static void InvalidateGridMesh(TerrainAssetAdapter terrain)
-        {
-            if (terrain == null)
-            {
-                DisposeGridMeshes();
-                return;
-            }
-
-            if (gridMeshCache.TryGetValue(terrain, out var data))
-            {
-                if (data.mesh != null)
-                {
-                    UnityEngine.Object.DestroyImmediate(data.mesh);
-                }
-                gridMeshCache.Remove(terrain);
-            }
-        }
-
-        private static void DisposeGridMeshes()
-        {
-            foreach (var kv in gridMeshCache)
-            {
-                if (kv.Value.mesh != null)
-                {
-                    UnityEngine.Object.DestroyImmediate(kv.Value.mesh);
-                }
-            }
-            gridMeshCache.Clear();
-        }
-
-        private static void PruneMeshCaches(TerrainAssetAdapter activeTerrain)
-        {
-            if (activeTerrain == null)
-            {
-                DisposeOverlayMeshes();
-                DisposeGridMeshes();
-                return;
-            }
-
-            meshCacheRemovalBuffer.Clear();
-            foreach (var kv in overlayMeshCache)
-            {
-                if (!Equals(kv.Key, activeTerrain))
-                {
-                    if (kv.Value?.mesh != null)
-                    {
-                        UnityEngine.Object.DestroyImmediate(kv.Value.mesh);
-                    }
-                    meshCacheRemovalBuffer.Add(kv.Key);
-                }
-            }
-
-            foreach (var key in meshCacheRemovalBuffer)
-            {
-                overlayMeshCache.Remove(key);
-            }
-
-            meshCacheRemovalBuffer.Clear();
-
-            foreach (var kv in gridMeshCache)
-            {
-                if (!Equals(kv.Key, activeTerrain))
-                {
-                    if (kv.Value?.mesh != null)
-                    {
-                        UnityEngine.Object.DestroyImmediate(kv.Value.mesh);
-                    }
-                    meshCacheRemovalBuffer.Add(kv.Key);
-                }
-            }
-
-            foreach (var key in meshCacheRemovalBuffer)
-            {
-                gridMeshCache.Remove(key);
-            }
-
-            meshCacheRemovalBuffer.Clear();
-        }
-
-        private static Mesh GetGridMesh(TerrainAssetAdapter terrain, TerrainVirtualGrid grid, TerrainHeightCache cache, TerrainHeightSettings settings)
-        {
-            if (terrain == null || grid == null)
-            {
-                return null;
-            }
-
-            if (!gridMeshCache.TryGetValue(terrain, out var data))
-            {
-                data = new GridMeshData();
-                gridMeshCache[terrain] = data;
-            }
-
-            bool needsRebuild = data.mesh == null;
-            float currentOffsetX = worldOffset.x;
-            float currentOffsetZ = worldOffset.z;
-            string currentSceneKey = cache?.sceneKey ?? GetActiveSceneKey();
-            string currentColliderPath = cache?.colliderPath ?? string.Empty;
-            float currentFixedOffset = settings?.offset ?? 0f;
-            float currentThickness = gridThickness;
-            float currentWorldThickness = Mathf.Max(0.0005f, currentGridThicknessWorld);
-            Color currentColor = gridColor;
-            TerrainHeightMode currentMode = settings?.mode ?? TerrainHeightMode.FixedOffset;
-
-            if (!needsRebuild)
-            {
-                needsRebuild |= data.width != terrain.m_Width || data.height != terrain.m_Height;
-                needsRebuild |= !Mathf.Approximately(data.offsetX, currentOffsetX) || !Mathf.Approximately(data.offsetZ, currentOffsetZ);
-                needsRebuild |= data.heightMode != currentMode;
-                needsRebuild |= data.colliderPath != currentColliderPath;
-                needsRebuild |= data.sceneKey != currentSceneKey;
-                needsRebuild |= !Mathf.Approximately(data.pixelThickness, currentThickness);
-                needsRebuild |= !Mathf.Approximately(data.worldThickness, currentWorldThickness);
-                needsRebuild |= data.color != currentColor;
-                if (currentMode == TerrainHeightMode.FixedOffset)
-                {
-                    needsRebuild |= !Mathf.Approximately(data.fixedOffset, currentFixedOffset);
-                }
-                else
-                {
-                    needsRebuild |= data.heightCache != cache || cache == null;
-                }
-            }
-
-            if (needsRebuild)
-            {
-                BuildGridMesh(data, terrain, grid, cache, settings, currentWorldThickness);
-            }
-
-            return data.mesh;
-        }
-
-        private static void BuildGridMesh(GridMeshData data, TerrainAssetAdapter terrain, TerrainVirtualGrid grid, TerrainHeightCache cache, TerrainHeightSettings settings, float currentWorldThickness)
-        {
-            int width = terrain.m_Width;
-            int height = terrain.m_Height;
-            if (!showGridLines || width <= 0 || height <= 0)
-            {
-                if (data.mesh != null)
-                {
-                    data.mesh.Clear();
-                }
-                data.width = width;
-                data.height = height;
-                data.vertices = null;
-                data.colors = null;
-                data.indices = null;
-                data.heightCache = cache;
-                data.heightMode = settings?.mode ?? TerrainHeightMode.FixedOffset;
-                data.offsetX = worldOffset.x;
-                data.offsetZ = worldOffset.z;
-                data.sceneKey = cache?.sceneKey ?? GetActiveSceneKey();
-                data.colliderPath = cache?.colliderPath ?? string.Empty;
-                data.fixedOffset = settings?.offset ?? 0f;
-                data.pixelThickness = gridThickness;
-                data.worldThickness = currentWorldThickness;
-                data.color = gridColor;
-                return;
-            }
-
-            float startX = terrain.m_X + worldOffset.x;
-            float startZ = terrain.m_Z + worldOffset.z;
-            const float lift = 0.01f;
-            float halfThickness = Mathf.Max(0.0005f, currentWorldThickness * 0.5f);
-
-            int horizontalSegments = width * (height + 1);
-            int verticalSegments = height * (width + 1);
-            int totalSegments = horizontalSegments + verticalSegments;
-            int vertexCount = totalSegments * 4;
-            int indexCount = totalSegments * 6;
-
-            if (data.vertices == null || data.vertices.Length != vertexCount)
-            {
-                data.vertices = new Vector3[vertexCount];
-            }
-            if (data.colors == null || data.colors.Length != vertexCount)
-            {
-                data.colors = new Color[vertexCount];
-            }
-            if (data.indices == null || data.indices.Length != indexCount)
-            {
-                data.indices = new int[indexCount];
-            }
-
-            int vertexOffset = 0;
-            int indexOffset = 0;
-            Color vertexColor = gridColor;
-
-            for (int row = 0; row <= height; row++)
-            {
-                float z = startZ + row * TILE_SIZE;
-                for (int col = 0; col < width; col++)
-                {
-                    float x0 = startX + col * TILE_SIZE;
-                    float x1 = startX + (col + 1) * TILE_SIZE;
-                    float hStart = ResolveCornerHeight(cache, settings, col, row) + lift;
-                    float hEnd = ResolveCornerHeight(cache, settings, col + 1, row) + lift;
-                    Vector3 start = new Vector3(x0, hStart, z);
-                    Vector3 end = new Vector3(x1, hEnd, z);
-                    AppendGridSegment(data, ref vertexOffset, ref indexOffset, start, end, halfThickness, vertexColor);
-                }
-            }
-
-            for (int col = 0; col <= width; col++)
-            {
-                float x = startX + col * TILE_SIZE;
-                for (int rowIndex = 0; rowIndex < height; rowIndex++)
-                {
-                    float z0 = startZ + rowIndex * TILE_SIZE;
-                    float z1 = startZ + (rowIndex + 1) * TILE_SIZE;
-                    float hStart = ResolveCornerHeight(cache, settings, col, rowIndex) + lift;
-                    float hEnd = ResolveCornerHeight(cache, settings, col, rowIndex + 1) + lift;
-                    Vector3 start = new Vector3(x, hStart, z0);
-                    Vector3 end = new Vector3(x, hEnd, z1);
-                    AppendGridSegment(data, ref vertexOffset, ref indexOffset, start, end, halfThickness, vertexColor);
-                }
-            }
-
-            if (data.mesh == null)
-            {
-                data.mesh = new Mesh { name = $"TerrainGrid_{terrain.Name}" };
-            }
-
-            data.mesh.Clear();
-            data.mesh.indexFormat = vertexCount > 65535 ? IndexFormat.UInt32 : IndexFormat.UInt16;
-            data.mesh.vertices = data.vertices;
-            data.mesh.colors = data.colors;
-            data.mesh.SetIndices(data.indices, MeshTopology.Triangles, 0, false);
-            data.mesh.RecalculateBounds();
-
-            data.width = width;
-            data.height = height;
-            data.offsetX = worldOffset.x;
-            data.offsetZ = worldOffset.z;
-            data.sceneKey = cache?.sceneKey ?? GetActiveSceneKey();
-            data.colliderPath = cache?.colliderPath ?? string.Empty;
-            data.heightCache = cache;
-            data.heightMode = settings?.mode ?? TerrainHeightMode.FixedOffset;
-            data.fixedOffset = settings?.offset ?? 0f;
-            data.pixelThickness = gridThickness;
-            data.worldThickness = currentWorldThickness;
-            data.color = gridColor;
-        }
-
-        private static void AppendGridSegment(GridMeshData data, ref int vertexOffset, ref int indexOffset, Vector3 start, Vector3 end, float halfThickness, Color color)
-        {
-            Vector3 direction = end - start;
-            float magnitude = direction.magnitude;
-            if (magnitude <= 1e-6f)
-            {
-                direction = Vector3.right;
-                magnitude = 1f;
-            }
-
-            Vector3 widthDir = Vector3.Cross(direction / magnitude, Vector3.up);
-            if (widthDir.sqrMagnitude <= 1e-6f)
-            {
-                widthDir = Vector3.Cross(direction / magnitude, Vector3.right);
-            }
-            widthDir = widthDir.normalized * halfThickness;
-
-            Vector3 v0 = start + widthDir;
-            Vector3 v1 = start - widthDir;
-            Vector3 v2 = end - widthDir;
-            Vector3 v3 = end + widthDir;
-
-            data.vertices[vertexOffset] = v0;
-            data.vertices[vertexOffset + 1] = v1;
-            data.vertices[vertexOffset + 2] = v2;
-            data.vertices[vertexOffset + 3] = v3;
-
-            data.colors[vertexOffset] = color;
-            data.colors[vertexOffset + 1] = color;
-            data.colors[vertexOffset + 2] = color;
-            data.colors[vertexOffset + 3] = color;
-
-            data.indices[indexOffset] = vertexOffset;
-            data.indices[indexOffset + 1] = vertexOffset + 1;
-            data.indices[indexOffset + 2] = vertexOffset + 2;
-            data.indices[indexOffset + 3] = vertexOffset;
-            data.indices[indexOffset + 4] = vertexOffset + 2;
-            data.indices[indexOffset + 5] = vertexOffset + 3;
-
-            vertexOffset += 4;
-            indexOffset += 6;
-        }
-
-        private static Mesh GetOverlayMesh(TerrainAssetAdapter terrain, TerrainVirtualGrid grid, TerrainHeightCache cache, TerrainHeightSettings settings)
-        {
-            if (terrain == null || grid == null || terrainDatabase == null)
-            {
-                return null;
-            }
-
-            if (!overlayMeshCache.TryGetValue(terrain, out var data))
-            {
-                data = new OverlayMeshData();
-                overlayMeshCache[terrain] = data;
-            }
-
-            bool needsRebuild = data.mesh == null;
-
-            float currentOffsetX = worldOffset.x;
-            float currentOffsetZ = worldOffset.z;
-            float currentFixedOffset = settings?.offset ?? 0f;
-            string currentSceneKey = cache?.sceneKey ?? GetActiveSceneKey();
-            string currentColliderPath = cache?.colliderPath ?? string.Empty;
-
-            if (!needsRebuild)
-            {
-                needsRebuild |= data.width != terrain.m_Width || data.height != terrain.m_Height;
-                needsRebuild |= !Mathf.Approximately(data.offsetX, currentOffsetX) || !Mathf.Approximately(data.offsetZ, currentOffsetZ);
-                needsRebuild |= data.heightMode != (settings?.mode ?? TerrainHeightMode.FixedOffset);
-                needsRebuild |= data.colorOpacity != colorOpacity || data.colorBrightness != colorBrightness || data.displayMode != displayMode;
-                needsRebuild |= data.colliderPath != currentColliderPath;
-                needsRebuild |= data.sceneKey != currentSceneKey;
-                if (data.heightMode == TerrainHeightMode.FixedOffset)
-                {
-                    needsRebuild |= !Mathf.Approximately(data.fixedOffset, currentFixedOffset);
-                }
-                else
-                {
-                    needsRebuild |= data.heightCache != cache || cache == null;
-                }
-            }
-
-            if (needsRebuild)
-            {
-                BuildOverlayMesh(data, terrain, grid, cache, settings);
-            }
-
-            return data.mesh;
-        }
-
-        private static void BuildOverlayMesh(OverlayMeshData data, TerrainAssetAdapter terrain, TerrainVirtualGrid grid, TerrainHeightCache cache, TerrainHeightSettings settings)
-        {
-            int width = terrain.m_Width;
-            int height = terrain.m_Height;
-            int tileCount = width * height;
-            if (tileCount <= 0)
-            {
-                if (data.mesh != null)
-                {
-                    data.mesh.Clear();
-                }
-                data.width = width;
-                data.height = height;
-                data.vertices = null;
-                data.colors = null;
-                data.indices = null;
-                data.heightCache = cache;
-                data.heightMode = settings?.mode ?? TerrainHeightMode.FixedOffset;
-                data.offsetX = worldOffset.x;
-                data.offsetZ = worldOffset.z;
-                data.sceneKey = cache?.sceneKey ?? GetActiveSceneKey();
-                data.colorOpacity = colorOpacity;
-                data.colorBrightness = colorBrightness;
-                data.displayMode = displayMode;
-                data.colliderPath = cache?.colliderPath ?? string.Empty;
-                data.fixedOffset = settings?.offset ?? 0f;
-                return;
-            }
-
-            int vertexCount = tileCount * 4;
-            int indexCount = tileCount * 6;
-
-            if (data.vertices == null || data.vertices.Length != vertexCount)
-            {
-                data.vertices = new Vector3[vertexCount];
-            }
-            if (data.colors == null || data.colors.Length != vertexCount)
-            {
-                data.colors = new Color[vertexCount];
-            }
-            if (data.indices == null || data.indices.Length != indexCount)
-            {
-                data.indices = new int[indexCount];
-                int tIndex = 0;
-                for (int tile = 0; tile < tileCount; tile++)
-                {
-                    int vBase = tile * 4;
-                    data.indices[tIndex++] = vBase;
-                    data.indices[tIndex++] = vBase + 2;
-                    data.indices[tIndex++] = vBase + 1;
-                    data.indices[tIndex++] = vBase;
-                    data.indices[tIndex++] = vBase + 3;
-                    data.indices[tIndex++] = vBase + 2;
-                }
-            }
-
-            float startX = terrain.m_X + worldOffset.x;
-            float startZ = terrain.m_Z + worldOffset.z;
-
-            int vertexOffset = 0;
-            for (int row = 0; row < height; row++)
-            {
-                for (int col = 0; col < width; col++)
-                {
-                    float baseX = startX + col * TILE_SIZE;
-                    float baseZ = startZ + row * TILE_SIZE;
-
-                    float h00 = ResolveCornerHeight(cache, settings, col, row);
-                    float h10 = ResolveCornerHeight(cache, settings, col + 1, row);
-                    float h11 = ResolveCornerHeight(cache, settings, col + 1, row + 1);
-                    float h01 = ResolveCornerHeight(cache, settings, col, row + 1);
-
-                    data.vertices[vertexOffset] = new Vector3(baseX, h00, baseZ);
-                    data.vertices[vertexOffset + 1] = new Vector3(baseX + TILE_SIZE, h10, baseZ);
-                    data.vertices[vertexOffset + 2] = new Vector3(baseX + TILE_SIZE, h11, baseZ + TILE_SIZE);
-                    data.vertices[vertexOffset + 3] = new Vector3(baseX, h01, baseZ + TILE_SIZE);
-
-                    string terrainId = grid.GetTerrainId(col, row);
-                    Color tileColor = IsEmptyTerrain(terrainId) ? new Color(0f, 0f, 0f, 0f) : GetTileFillColor(terrainId);
-                    data.colors[vertexOffset] = tileColor;
-                    data.colors[vertexOffset + 1] = tileColor;
-                    data.colors[vertexOffset + 2] = tileColor;
-                    data.colors[vertexOffset + 3] = tileColor;
-
-                    vertexOffset += 4;
-                }
-            }
-
-            if (data.mesh == null)
-            {
-                data.mesh = new Mesh { name = $"TerrainOverlay_{terrain.Name}" };
-            }
-
-            data.mesh.Clear();
-            data.mesh.indexFormat = vertexCount > 65535 ? IndexFormat.UInt32 : IndexFormat.UInt16;
-            data.mesh.vertices = data.vertices;
-            data.mesh.colors = data.colors;
-            data.mesh.SetIndices(data.indices, MeshTopology.Triangles, 0, false);
-            data.mesh.RecalculateBounds();
-
-            data.width = width;
-            data.height = height;
-            data.heightCache = cache;
-            data.heightMode = settings?.mode ?? TerrainHeightMode.FixedOffset;
-            data.offsetX = worldOffset.x;
-            data.offsetZ = worldOffset.z;
-            data.sceneKey = cache?.sceneKey ?? GetActiveSceneKey();
-            data.colorOpacity = colorOpacity;
-            data.colorBrightness = colorBrightness;
-            data.displayMode = displayMode;
-            data.colliderPath = cache?.colliderPath ?? string.Empty;
-            data.fixedOffset = settings?.offset ?? 0f;
-        }
-
-
-        private static void InvalidateTerrainHeightCache(TerrainAssetAdapter terrain)
-        {
-            if (terrain == null)
-            {
-                terrainHeightCache.Clear();
-                sceneColliderCache.Clear();
-                loggedRaycastFailures.Clear();
-                DisposeGridMeshes();
-                return;
-            }
-
-            terrainHeightCache.Remove(terrain);
-            sceneColliderCache.Clear();
-            InvalidateOverlayMesh(terrain);
-            InvalidateGridMesh(terrain);
-
-            if (terrain?.Asset != null)
-            {
-                string assetPath = AssetDatabase.GetAssetPath(terrain.Asset);
-                RemoveRaycastFailureEntries(assetPath);
-            }
-        }
-
-        internal static void NotifyTerrainDatabaseChanged()
-        {
-            InvalidateTerrainCaches();
-            if (instance != null)
-            {
-                instance.Repaint();
-            }
-            SceneView.RepaintAll();
-        }
-
-        internal static Vector3 GetWorldOffset()
-        {
-            return worldOffset;
-        }
-
-        internal static float GetHeightOffsetForTerrain(TerrainAssetAdapter terrain)
-        {
-            return GetHeightSettings(terrain).offset;
-        }
-
-        private static TerrainHeightSettings GetHeightSettings(TerrainAssetAdapter terrain)
-        {
-            LoadTerrainHeightPreferencesIfNeeded();
-
-            if (terrain?.Asset == null)
-            {
-                return new TerrainHeightSettings
-                {
-                    offset = 0f,
-                    mode = TerrainHeightMode.FixedOffset
-                };
-            }
-
-            string path = AssetDatabase.GetAssetPath(terrain.Asset);
-            return GetHeightSettingsForPath(path);
-        }
-
-        private static TerrainHeightSettings GetHeightSettingsForPath(string assetPath)
-        {
-            LoadTerrainHeightPreferencesIfNeeded();
-
-            if (string.IsNullOrEmpty(assetPath))
-            {
-                return new TerrainHeightSettings
-                {
-                    offset = 0f,
-                    mode = TerrainHeightMode.FixedOffset
-                };
-            }
-
-            if (!terrainHeightSettings.TryGetValue(assetPath, out TerrainHeightSettings settings))
-            {
-                settings = new TerrainHeightSettings
-                {
-                    offset = 0f,
-                    mode = TerrainHeightMode.FixedOffset
-                };
-                terrainHeightSettings[assetPath] = settings;
-            }
-
-            return settings;
-        }
-
-        private static void LoadTerrainHeightPreferencesIfNeeded()
-        {
-            if (terrainHeightPrefsLoaded)
-            {
-                return;
-            }
-
-            terrainHeightSettings.Clear();
-            string json = EditorPrefs.GetString(PREFS_TERRAIN_HEIGHTS, string.Empty);
-            if (!string.IsNullOrEmpty(json))
-            {
-                try
-                {
-                    var prefs = new TerrainHeightPreferences();
-                    EditorJsonUtility.FromJsonOverwrite(json, prefs);
-                    if (prefs.paths != null)
-                    {
-                        int count = prefs.paths.Count;
-                        for (int i = 0; i < count; i++)
-                        {
-                            string path = prefs.paths[i];
-                            if (string.IsNullOrEmpty(path))
-                            {
-                                continue;
-                            }
-
-                            float offset = (prefs.heights != null && i < prefs.heights.Count) ? prefs.heights[i] : 0f;
-                            TerrainHeightMode mode = TerrainHeightMode.FixedOffset;
-                            if (prefs.modes != null && i < prefs.modes.Count)
-                            {
-                                mode = (TerrainHeightMode)Mathf.Clamp(prefs.modes[i], 0, (int)TerrainHeightMode.RaycastMesh);
-                            }
-
-                            bool autoSelect = true;
-                            if (prefs.autoColliderFlags != null && i < prefs.autoColliderFlags.Count)
-                            {
-                                autoSelect = prefs.autoColliderFlags[i] != 0;
-                            }
-
-                            string colliderPath = string.Empty;
-                            if (prefs.colliderPaths != null && i < prefs.colliderPaths.Count)
-                            {
-                                colliderPath = prefs.colliderPaths[i] ?? string.Empty;
-                            }
-
-                            terrainHeightSettings[path] = new TerrainHeightSettings
-                            {
-                                offset = offset,
-                                mode = mode,
-                                autoSelectCollider = autoSelect,
-                                colliderPath = colliderPath
-                            };
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogWarning($"Failed to load terrain height preferences: {ex.Message}");
-                    terrainHeightSettings.Clear();
-                }
-            }
-
-            terrainHeightPrefsLoaded = true;
-        }
-
-        private static void SaveTerrainHeightPreferences()
-        {
-            var prefs = new TerrainHeightPreferences();
-            foreach (var kvp in terrainHeightSettings)
-            {
-                prefs.paths.Add(kvp.Key);
-                prefs.heights.Add(kvp.Value.offset);
-                prefs.modes.Add((int)kvp.Value.mode);
-                prefs.autoColliderFlags.Add(kvp.Value.autoSelectCollider ? 1 : 0);
-                prefs.colliderPaths.Add(kvp.Value.colliderPath ?? string.Empty);
-            }
-
-            string json = EditorJsonUtility.ToJson(prefs);
-            EditorPrefs.SetString(PREFS_TERRAIN_HEIGHTS, json);
-        }
-
-        private static void ApplyTerrainHeightForSelection()
-        {
-            worldOffset.y = GetHeightOffsetForTerrain(selectedTerrain);
-        }
-
-        private static void StoreCurrentTerrainHeight()
-        {
-            if (selectedTerrain?.Asset == null)
-            {
-                return;
-            }
-
-            string path = AssetDatabase.GetAssetPath(selectedTerrain.Asset);
-            if (string.IsNullOrEmpty(path))
-            {
-                return;
-            }
-
-            TerrainHeightSettings settings = GetHeightSettingsForPath(path);
-            settings.offset = worldOffset.y;
-            terrainHeightSettings[path] = settings;
-            SaveTerrainHeightPreferences();
-        }
-
-        private static void SetHeightModeForTerrain(TerrainAssetAdapter terrain, TerrainHeightMode mode)
-        {
-            if (terrain?.Asset == null)
-            {
-                return;
-            }
-
-            string path = AssetDatabase.GetAssetPath(terrain.Asset);
-            if (string.IsNullOrEmpty(path))
-            {
-                return;
-            }
-
-            TerrainHeightSettings settings = GetHeightSettingsForPath(path);
-            if (settings.mode == mode)
-            {
-                return;
-            }
-
-            settings.mode = mode;
-            terrainHeightSettings[path] = settings;
-            InvalidateTerrainHeightCache(terrain);
-            RemoveRaycastFailureEntries(path);
-            sceneColliderCache.Clear();
-            SaveTerrainHeightPreferences();
-        }
-
-        private static void SetColliderSelectionForTerrain(TerrainAssetAdapter terrain, bool autoSelect, string colliderPath)
-        {
-            if (terrain?.Asset == null)
-            {
-                return;
-            }
-
-            string path = AssetDatabase.GetAssetPath(terrain.Asset);
-            if (string.IsNullOrEmpty(path))
-            {
-                return;
-            }
-
-            TerrainHeightSettings settings = GetHeightSettingsForPath(path);
-            string normalizedPath = autoSelect ? string.Empty : (colliderPath ?? string.Empty);
-            if (settings.autoSelectCollider == autoSelect && string.Equals(settings.colliderPath ?? string.Empty, normalizedPath, StringComparison.OrdinalIgnoreCase))
-            {
-                return;
-            }
-
-            settings.autoSelectCollider = autoSelect;
-            settings.colliderPath = normalizedPath;
-            terrainHeightSettings[path] = settings;
-            InvalidateTerrainHeightCache(terrain);
-            RemoveRaycastFailureEntries(path);
-            sceneColliderCache.Clear();
-            SaveTerrainHeightPreferences();
-        }
-
-        private static void OnActiveSceneChanged(Scene previousScene, Scene newScene)
-        {
-            InvalidateTerrainHeightCache(null);
-            SceneView.RepaintAll();
-            DisposToolWindow.RequestRepaintAll(repaintScene: true);
-        }
-
-        private static string GetSceneKey(Scene scene)
-        {
-            if (!scene.IsValid())
-            {
-                return string.Empty;
-            }
-
-            return !string.IsNullOrEmpty(scene.path) ? scene.path : scene.name;
-        }
-
-        private static string GetActiveSceneKey()
-        {
-            return GetSceneKey(SceneManager.GetActiveScene());
-        }
-
-        private static string GetColliderSelectionKey(TerrainHeightSettings settings)
-        {
-            if (settings == null || settings.autoSelectCollider || string.IsNullOrEmpty(settings.colliderPath))
-            {
-                return "<auto>";
-            }
-
-            return settings.colliderPath;
-        }
-
-        private static MeshCollider GetSceneMeshCollider(Scene scene, TerrainHeightSettings settings, TerrainAssetAdapter terrain, bool logWarnings, out string colliderPath)
-        {
-            colliderPath = string.Empty;
-            string sceneKey = GetSceneKey(scene);
-            string selectionKey = GetColliderSelectionKey(settings);
-            string cacheKey = sceneKey + "|" + selectionKey;
-
-            if (sceneColliderCache.TryGetValue(cacheKey, out MeshCollider cached) && cached != null)
-            {
-                colliderPath = GetTransformPath(cached.transform);
-                return cached;
-            }
-
-            sceneColliderCache.Remove(cacheKey);
-
-            MeshCollider collider = null;
-
-            if (settings != null && !settings.autoSelectCollider && !string.IsNullOrEmpty(settings.colliderPath))
-            {
-                collider = FindMeshColliderByPath(scene, settings.colliderPath);
-                if (collider == null && logWarnings)
-                {
-                    LogRaycastFailure(terrain, sceneKey, settings.colliderPath, $"MeshCollider '{settings.colliderPath}' not found; falling back to auto selection.");
-                }
-            }
-
-            if (collider == null)
-            {
-                collider = FindDefaultMeshCollider(scene);
-                if (collider == null && logWarnings)
-                {
-                    LogRaycastFailure(terrain, sceneKey, string.Empty, "No MeshCollider found in the active scene. Using fixed height instead.");
-                }
-            }
-
-            if (collider != null)
-            {
-                colliderPath = GetTransformPath(collider.transform);
-
-                bool cacheResult = true;
-                if (settings != null && !settings.autoSelectCollider && !string.IsNullOrEmpty(settings.colliderPath))
-                {
-                    if (!string.Equals(colliderPath, settings.colliderPath, StringComparison.OrdinalIgnoreCase))
-                    {
-                        cacheResult = false;
-                    }
-                }
-
-                if (cacheResult)
-                {
-                    sceneColliderCache[cacheKey] = collider;
-                }
-            }
-
-            return collider;
-        }
-
-        private static MeshCollider FindMeshColliderByPath(Scene scene, string colliderPath)
-        {
-            if (string.IsNullOrEmpty(colliderPath))
-            {
-                return null;
-            }
-
-            MeshCollider[] colliders = UnityEngine.Object.FindObjectsOfType<MeshCollider>(true);
-            foreach (MeshCollider collider in colliders)
-            {
-                if (collider == null || collider.sharedMesh == null)
-                {
-                    continue;
-                }
-
-                if (!collider.gameObject.scene.IsValid() || collider.gameObject.scene != scene)
-                {
-                    continue;
-                }
-
-                string path = GetTransformPath(collider.transform);
-                if (string.Equals(path, colliderPath, StringComparison.OrdinalIgnoreCase))
-                {
-                    return collider;
-                }
-            }
-
-            return null;
-        }
-
-        private static MeshCollider FindDefaultMeshCollider(Scene scene)
-        {
-            MeshCollider fallback = null;
-
-            MeshCollider[] colliders = UnityEngine.Object.FindObjectsOfType<MeshCollider>(true);
-            foreach (MeshCollider collider in colliders)
-            {
-                if (collider == null || collider.sharedMesh == null)
-                {
-                    continue;
-                }
-
-                if (!collider.gameObject.scene.IsValid() || collider.gameObject.scene != scene)
-                {
-                    continue;
-                }
-
-                if (!collider.enabled)
-                {
-                    continue;
-                }
-
-                if (IsUnderBmap(collider.transform))
-                {
-                    return collider;
-                }
-
-                if (fallback == null)
-                {
-                    fallback = collider;
-                }
-            }
-
-            return fallback;
-        }
-
-        private static List<MeshCollider> GetSceneColliders(Scene scene)
-        {
-            MeshCollider[] colliders = UnityEngine.Object.FindObjectsOfType<MeshCollider>(true);
-            List<MeshCollider> results = new List<MeshCollider>();
-            foreach (MeshCollider collider in colliders)
-            {
-                if (collider == null || collider.sharedMesh == null)
-                {
-                    continue;
-                }
-
-                if (!collider.gameObject.scene.IsValid() || collider.gameObject.scene != scene)
-                {
-                    continue;
-                }
-
-                if (!collider.enabled)
-                {
-                    continue;
-                }
-
-                results.Add(collider);
-            }
-
-            results.Sort((a, b) => string.Compare(GetTransformPath(a.transform), GetTransformPath(b.transform), StringComparison.OrdinalIgnoreCase));
-            return results;
-        }
-
-        private static bool IsUnderBmap(Transform transform)
-        {
-            Transform current = transform;
-            while (current != null)
-            {
-                if (string.Equals(current.name, "Bmap", StringComparison.OrdinalIgnoreCase))
-                {
-                    return true;
-                }
-                current = current.parent;
-            }
-
-            return false;
-        }
-
-        private static string GetTransformPath(Transform transform)
-        {
-            if (transform == null)
-            {
-                return string.Empty;
-            }
-
-            List<string> segments = new List<string>();
-            Transform current = transform;
-            while (current != null)
-            {
-                segments.Add(current.name);
-                current = current.parent;
-            }
-            segments.Reverse();
-            return string.Join("/", segments);
-        }
-
-        private static string BuildRaycastLogKey(TerrainAssetAdapter terrain, string sceneKey, string colliderPath)
-        {
-            string path = string.Empty;
-            if (terrain?.Asset != null)
-            {
-                path = AssetDatabase.GetAssetPath(terrain.Asset);
-            }
-
-            string terrainSegment = path ?? string.Empty;
-            string sceneSegment = sceneKey ?? string.Empty;
-            string colliderSegment = colliderPath ?? string.Empty;
-            return sceneSegment + "|" + terrainSegment + "|" + colliderSegment;
-        }
-
-        private static void LogRaycastFailure(TerrainAssetAdapter terrain, string sceneKey, string colliderPath, string message)
-        {
-            string key = BuildRaycastLogKey(terrain, sceneKey, colliderPath);
-            if (loggedRaycastFailures.Contains(key))
-            {
-                return;
-            }
-
-            string terrainName = terrain?.Name ?? "<none>";
-            string colliderInfo = string.IsNullOrEmpty(colliderPath) ? "<auto>" : colliderPath;
-            string composedMessage = $"[Terrain Painter] {message} (Scene: {sceneKey}, Terrain: {terrainName}, Collider: {colliderInfo})";
-            Debug.LogWarning(composedMessage);
-            loggedRaycastFailures.Add(key);
-        }
-
-        private static bool IsHeightCacheValid(TerrainAssetAdapter terrain, TerrainHeightSettings settings, TerrainHeightCache cache)
-        {
-            if (terrain == null || settings == null)
-            {
-                return false;
-            }
-
-            if (settings.mode != TerrainHeightMode.RaycastMesh)
-            {
-                return false;
-            }
-
-            if (cache == null || cache.centerSamples == null || cache.cornerSamples == null)
-            {
-                return false;
-            }
-
-            if (cache.mode != settings.mode)
-            {
-                return false;
-            }
-
-            if (cache.autoSelection != settings.autoSelectCollider)
-            {
-                return false;
-            }
-
-            if (!cache.autoSelection)
-            {
-                if (!string.Equals(cache.requestedColliderPath ?? string.Empty, settings.colliderPath ?? string.Empty, StringComparison.OrdinalIgnoreCase))
-                {
-                    return false;
-                }
-            }
-
-            if (cache.width != terrain.m_Width || cache.height != terrain.m_Height)
-            {
-                return false;
-            }
-
-            if (!Mathf.Approximately(cache.originX, terrain.m_X) || !Mathf.Approximately(cache.originZ, terrain.m_Z))
-            {
-                return false;
-            }
-
-            if (!Mathf.Approximately(cache.offsetX, worldOffset.x) || !Mathf.Approximately(cache.offsetZ, worldOffset.z))
-            {
-                return false;
-            }
-
-            if (!string.Equals(cache.sceneKey, GetActiveSceneKey(), StringComparison.OrdinalIgnoreCase))
-            {
-                return false;
-            }
-
-            if (cache.centerSamples.Length != cache.width * cache.height)
-            {
-                return false;
-            }
-
-            if (cache.cornerSamples.Length != (cache.width + 1) * (cache.height + 1))
-            {
-                return false;
-            }
-
-            return true;
-        }
-
-        private static TerrainHeightCache GetOrBuildTerrainHeightCache(TerrainAssetAdapter terrain, TerrainHeightSettings settings)
-        {
-            if (terrain == null || settings == null || settings.mode != TerrainHeightMode.RaycastMesh)
-            {
-                return null;
-            }
-
-            if (!terrainHeightCache.TryGetValue(terrain, out TerrainHeightCache cache) || !IsHeightCacheValid(terrain, settings, cache))
-            {
-                cache = BuildTerrainHeightCache(terrain, settings);
-                terrainHeightCache[terrain] = cache;
-            }
-
-            return cache;
-        }
-
-        private static TerrainHeightCache BuildTerrainHeightCache(TerrainAssetAdapter terrain, TerrainHeightSettings settings)
-        {
-            var cache = new TerrainHeightCache
-            {
-                mode = settings.mode,
-                width = terrain.m_Width,
-                height = terrain.m_Height,
-                originX = terrain.m_X,
-                originZ = terrain.m_Z,
-                offsetX = worldOffset.x,
-                offsetZ = worldOffset.z,
-                sceneKey = GetActiveSceneKey()
-            };
-
-            int centerCount = Mathf.Max(0, cache.width * cache.height);
-            cache.centerSamples = new float[centerCount];
-            for (int i = 0; i < centerCount; i++)
-            {
-                cache.centerSamples[i] = float.NaN;
-            }
-
-            int cornerCount = (cache.width + 1) * (cache.height + 1);
-            cache.cornerSamples = new float[cornerCount];
-            for (int i = 0; i < cornerCount; i++)
-            {
-                cache.cornerSamples[i] = float.NaN;
-            }
-
-            Scene activeScene = SceneManager.GetActiveScene();
-            string usedColliderPath;
-            MeshCollider collider = GetSceneMeshCollider(activeScene, settings, terrain, true, out usedColliderPath);
-
-            cache.autoSelection = settings?.autoSelectCollider ?? true;
-            cache.requestedColliderPath = settings?.colliderPath ?? string.Empty;
-            cache.colliderPath = usedColliderPath ?? string.Empty;
-
-            if (collider == null)
-            {
-                return cache;
-            }
-
-            Bounds bounds = collider.bounds;
-            float topY = bounds.max.y + 100f;
-            float bottomY = bounds.min.y - 100f;
-            float maxDistance = Mathf.Max(1f, topY - bottomY);
-            float startX = terrain.m_X + worldOffset.x;
-            float startZ = terrain.m_Z + worldOffset.z;
-            float halfTile = TILE_SIZE * 0.5f;
-
-            for (int row = 0; row <= cache.height; row++)
-            {
-                for (int col = 0; col <= cache.width; col++)
-                {
-                    int cornerIndex = row * (cache.width + 1) + col;
-                    float cornerX = startX + col * TILE_SIZE;
-                    float cornerZ = startZ + row * TILE_SIZE;
-
-                    if (TrySampleHeight(collider, topY, bottomY, maxDistance, cornerX, cornerZ, out float cornerHeight))
-                    {
-                        cache.cornerSamples[cornerIndex] = cornerHeight;
-                        cache.anyCornerHits = true;
-                    }
-                }
-            }
-
-            for (int row = 0; row < cache.height; row++)
-            {
-                for (int col = 0; col < cache.width; col++)
-                {
-                    int centerIndex = row * cache.width + col;
-                    float centerX = startX + col * TILE_SIZE + halfTile;
-                    float centerZ = startZ + row * TILE_SIZE + halfTile;
-
-                    if (TrySampleHeight(collider, topY, bottomY, maxDistance, centerX, centerZ, out float centerHeight))
-                    {
-                        cache.centerSamples[centerIndex] = centerHeight;
-                        cache.anyCenterHits = true;
-                    }
-                }
-            }
-
-            bool anyHits = cache.anyCenterHits || cache.anyCornerHits;
-            string logKey = BuildRaycastLogKey(terrain, cache.sceneKey, cache.colliderPath);
-            if (anyHits)
-            {
-                loggedRaycastFailures.Remove(logKey);
-            }
-            else
-            {
-                LogRaycastFailure(terrain, cache.sceneKey, cache.colliderPath, "Mesh raycasts hit nothing across the sampled terrain tiles. Using fixed height instead.");
-            }
-
-            return cache;
-        }
-
-        private static bool TrySampleHeight(MeshCollider collider, float topY, float bottomY, float maxDistance, float x, float z, out float height)
-        {
-            Vector3 downOrigin = new Vector3(x, topY, z);
-            Ray downRay = new Ray(downOrigin, Vector3.down);
-            if (collider.Raycast(downRay, out RaycastHit hit, maxDistance))
-            {
-                height = hit.point.y;
-                return true;
-            }
-
-            Vector3 upOrigin = new Vector3(x, bottomY, z);
-            Ray upRay = new Ray(upOrigin, Vector3.up);
-            if (collider.Raycast(upRay, out hit, maxDistance))
-            {
-                height = hit.point.y;
-                return true;
-            }
-
-            height = float.NaN;
-            return false;
-        }
-
-        private static float ResolveTileHeight(TerrainHeightCache cache, TerrainHeightSettings settings, int col, int row)
-        {
-            if (settings == null)
-            {
-                return worldOffset.y;
-            }
-
-            if (cache != null && cache.centerSamples != null && cache.width > 0 && cache.height > 0)
-            {
-                if (col >= 0 && col < cache.width && row >= 0 && row < cache.height)
-                {
-                    float sample = cache.centerSamples[row * cache.width + col];
-                    if (!float.IsNaN(sample))
-                    {
-                        return sample + settings.offset;
-                    }
-                }
-            }
-
-            return settings.offset;
-        }
-
-        private static float ResolveCornerHeight(TerrainHeightCache cache, TerrainHeightSettings settings, int col, int row)
-        {
-            if (settings == null)
-            {
-                return worldOffset.y;
-            }
-
-            if (cache != null && cache.cornerSamples != null && cache.width >= 0 && cache.height >= 0)
-            {
-                int maxCol = cache.width;
-                int maxRow = cache.height;
-                if (col >= 0 && col <= maxCol && row >= 0 && row <= maxRow)
-                {
-                    int index = row * (maxCol + 1) + col;
-                    if (index >= 0 && index < cache.cornerSamples.Length)
-                    {
-                        float sample = cache.cornerSamples[index];
-                        if (!float.IsNaN(sample))
-                        {
-                            return sample + settings.offset;
-                        }
-                    }
-                }
-            }
-
-            int fallbackCol = cache != null ? Mathf.Clamp(col, 0, Mathf.Max(cache.width - 1, 0)) : 0;
-            int fallbackRow = cache != null ? Mathf.Clamp(row, 0, Mathf.Max(cache.height - 1, 0)) : 0;
-            return ResolveTileHeight(cache, settings, fallbackCol, fallbackRow);
-        }
-
-        internal static float GetTileWorldHeight(TerrainAssetAdapter terrain, int col, int row)
-        {
-            TerrainHeightSettings settings = GetHeightSettings(terrain);
-            TerrainHeightCache cache = settings.mode == TerrainHeightMode.RaycastMesh ? GetOrBuildTerrainHeightCache(terrain, settings) : null;
-            return ResolveTileHeight(cache, settings, col, row);
-        }
-
-        internal static float GetTileCornerWorldHeight(TerrainAssetAdapter terrain, int cornerCol, int cornerRow)
-        {
-            TerrainHeightSettings settings = GetHeightSettings(terrain);
-            TerrainHeightCache cache = settings.mode == TerrainHeightMode.RaycastMesh ? GetOrBuildTerrainHeightCache(terrain, settings) : null;
-            return ResolveCornerHeight(cache, settings, cornerCol, cornerRow);
-        }
-
         private static Color GetBaseTerrainColor(string terrainId)
         {
             if (terrainDatabase == null || string.IsNullOrEmpty(terrainId))
@@ -1781,6 +418,124 @@ namespace DivineDragon.MapTools
             return new Color(color.r * 0.6f, color.g * 0.6f, color.b * 0.6f, 1f);
         }
 
+        private static void InvalidateTerrainCaches()
+        {
+            terrainColorCache.Clear();
+            paintableTerrainsDirty = true;
+            InvalidateTerrainHeightCache(null);
+            InvalidateOverlayMesh(null);
+            InvalidateGridMesh(null);
+        }
+
+        private static void RemoveRaycastFailureEntries(string assetPath)
+        {
+            if (string.IsNullOrEmpty(assetPath))
+            {
+                return;
+            }
+
+            raycastLogRemovalBuffer.Clear();
+            foreach (string key in loggedRaycastFailures)
+            {
+                string[] parts = key.Split('|');
+                if (parts.Length >= 2 && string.Equals(parts[1], assetPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    raycastLogRemovalBuffer.Add(key);
+                }
+            }
+
+            foreach (string key in raycastLogRemovalBuffer)
+            {
+                loggedRaycastFailures.Remove(key);
+            }
+        }
+        internal static void NotifyTerrainDatabaseChanged()
+        {
+            InvalidateTerrainCaches();
+            if (instance != null)
+            {
+                instance.Repaint();
+            }
+            SceneView.RepaintAll();
+        }
+
+        internal static Vector3 GetWorldOffset()
+        {
+            return worldOffset;
+        }
+
+        internal static float GetHeightOffsetForTerrain(TerrainAssetAdapter terrain)
+        {
+            return GetHeightSettings(terrain).offset;
+        }
+
+        private static void ApplyTerrainHeightForSelection()
+        {
+            worldOffset.y = GetHeightOffsetForTerrain(selectedTerrain);
+        }
+
+        private static void OnActiveSceneChanged(Scene previousScene, Scene newScene)
+        {
+            InvalidateTerrainHeightCache(null);
+            SceneView.RepaintAll();
+            DisposToolWindow.RequestRepaintAll(repaintScene: true);
+        }
+
+        private static void OnHierarchyChanged()
+        {
+            InvalidateSceneColliderLists();
+            sceneColliderCache.Clear();
+            SceneView.RepaintAll();
+            if (instance != null)
+            {
+                instance.Repaint();
+            }
+        }
+
+        private static string BuildRaycastLogKey(TerrainAssetAdapter terrain, string sceneKey, string colliderPath)
+        {
+            string path = string.Empty;
+            if (terrain?.Asset != null)
+            {
+                path = AssetDatabase.GetAssetPath(terrain.Asset);
+            }
+
+            string terrainSegment = path ?? string.Empty;
+            string sceneSegment = sceneKey ?? string.Empty;
+            string colliderSegment = colliderPath ?? string.Empty;
+            return sceneSegment + "|" + terrainSegment + "|" + colliderSegment;
+        }
+
+        private static void LogRaycastFailure(TerrainAssetAdapter terrain, string sceneKey, string colliderPath, string message)
+        {
+            string key = BuildRaycastLogKey(terrain, sceneKey, colliderPath);
+            if (loggedRaycastFailures.Contains(key))
+            {
+                return;
+            }
+
+            string terrainName = terrain?.Name ?? "<none>";
+            string colliderInfo = string.IsNullOrEmpty(colliderPath) ? "<auto>" : colliderPath;
+            string composedMessage = $"[Terrain Painter] {message} (Scene: {sceneKey}, Terrain: {terrainName}, Collider: {colliderInfo})";
+            Debug.LogWarning(composedMessage);
+            loggedRaycastFailures.Add(key);
+        }
+
+        private static string GetSceneKey(Scene scene)
+        {
+            if (!scene.IsValid())
+            {
+                return string.Empty;
+            }
+
+            return !string.IsNullOrEmpty(scene.path) ? scene.path : scene.name;
+        }
+
+        private static string GetActiveSceneKey()
+        {
+            return GetSceneKey(SceneManager.GetActiveScene());
+        }
+
         private static void FillQuad(Vector3[] buffer, float x, float z, float y, float size = TILE_SIZE, float yOffset = 0f)
         {
             float baseY = y + yOffset;
@@ -1796,24 +551,6 @@ namespace DivineDragon.MapTools
             buffer[1] = new Vector3(x + size, h10, z);
             buffer[2] = new Vector3(x + size, h11, z + size);
             buffer[3] = new Vector3(x, h01, z + size);
-        }
-
-        private static void FillTileQuad(Vector3[] buffer, float startX, float startZ, int col, int row, TerrainHeightCache cache, TerrainHeightSettings settings, float fallbackY, float yOffset = 0f)
-        {
-            float baseX = startX + col * TILE_SIZE;
-            float baseZ = startZ + row * TILE_SIZE;
-
-            if (settings != null && settings.mode == TerrainHeightMode.RaycastMesh && cache != null)
-            {
-                float h00 = ResolveCornerHeight(cache, settings, col, row) + yOffset;
-                float h10 = ResolveCornerHeight(cache, settings, col + 1, row) + yOffset;
-                float h11 = ResolveCornerHeight(cache, settings, col + 1, row + 1) + yOffset;
-                float h01 = ResolveCornerHeight(cache, settings, col, row + 1) + yOffset;
-                FillQuadWithCornerHeights(buffer, baseX, baseZ, TILE_SIZE, h00, h10, h11, h01);
-                return;
-            }
-
-            FillQuad(buffer, baseX, baseZ, fallbackY, TILE_SIZE, yOffset);
         }
 
         // Modifier detection for sampling (support Ctrl and Cmd)
@@ -1866,21 +603,12 @@ namespace DivineDragon.MapTools
         private static GUIContent s_LabelContent = new GUIContent();
         private static System.Collections.Generic.Dictionary<string,float> labelAlphaStates = new System.Collections.Generic.Dictionary<string,float>();
 
-        [Serializable]
-        private class TerrainHeightPreferences
-        {
-            public List<string> paths = new List<string>();
-            public List<float> heights = new List<float>();
-            public List<int> modes = new List<int>();
-            public List<int> autoColliderFlags = new List<int>();
-            public List<string> colliderPaths = new List<string>();
-        }
-        
         private void OnDisable()
         {
             SceneView.duringSceneGui -= OnSceneGUI;
             Undo.undoRedoPerformed -= OnUndoRedo;
             EditorSceneManager.activeSceneChangedInEditMode -= OnActiveSceneChanged;
+            EditorApplication.hierarchyChanged -= OnHierarchyChanged;
             DisposeOverlayMeshes();
             DisposeGridMeshes();
             if (overlayMaterial != null)
@@ -1895,6 +623,7 @@ namespace DivineDragon.MapTools
             SceneView.duringSceneGui -= OnSceneGUI;
             Undo.undoRedoPerformed -= OnUndoRedo;
             EditorSceneManager.activeSceneChangedInEditMode -= OnActiveSceneChanged;
+            EditorApplication.hierarchyChanged -= OnHierarchyChanged;
             DisposeOverlayMeshes();
             DisposeGridMeshes();
             if (overlayMaterial != null)
