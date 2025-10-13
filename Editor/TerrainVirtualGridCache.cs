@@ -79,18 +79,20 @@ namespace DivineDragon.MapTools
     {
         private readonly int[] actualIndices;
         private readonly string[] terrainIds;
+        private readonly int tailStartIndex;
 
         public TerrainAssetAdapter Adapter { get; }
         public int Width { get; }
         public int Height { get; }
 
-        private TerrainVirtualGrid(TerrainAssetAdapter adapter, int[] indices, string[] ids)
+        private TerrainVirtualGrid(TerrainAssetAdapter adapter, int[] indices, string[] ids, int tailStart)
         {
             Adapter = adapter;
             Width = adapter.Width;
             Height = adapter.Height;
             actualIndices = indices;
             terrainIds = ids;
+            tailStartIndex = tailStart;
         }
 
         public static TerrainVirtualGrid Build(
@@ -113,29 +115,78 @@ namespace DivineDragon.MapTools
             }
 
             var raw = adapter.m_Terrains ?? Array.Empty<string>();
+
+            // Detect if this is an official map with padding (1024 tiles, dimensions < 32)
+            bool isOfficialPaddedMap = raw.Length == 1024 && (width < 32 || height < 32);
+
             int fill = 0;
             bool overflow = false;
 
-            for (int rawIndex = 0; rawIndex < raw.Length; rawIndex++)
+            if (isOfficialPaddedMap)
             {
-                string tid = raw[rawIndex];
-                if (isEmptyPredicate(tid))
+                // For official maps, we need to handle the padding structure
+                // The data is stored in a 32x32 grid with padding at row ends and bottom
+                for (int y = 0; y < height; y++)
                 {
-                    continue;
-                }
+                    for (int x = 0; x < width; x++)
+                    {
+                        // Calculate the position in the 32x32 padded array
+                        int paddedIndex = y * 32 + x;
 
-                if (fill < expectedCount)
-                {
-                    actualIndices[fill] = rawIndex;
-                    terrainIds[fill] = tid;
-                    fill++;
-                }
-                else
-                {
-                    overflow = true;
-                    break;
+                        if (paddedIndex < raw.Length)
+                        {
+                            string tid = raw[paddedIndex];
+                            // Don't skip TID_無し here - it might be legitimate content
+                            // We'll include all tiles within the actual map bounds
+                            if (fill < expectedCount)
+                            {
+                                actualIndices[fill] = paddedIndex;
+                                terrainIds[fill] = tid;
+                                fill++;
+                            }
+                        }
+                    }
                 }
             }
+            else
+            {
+                // For custom maps, use the original logic (skip all empty tiles)
+                for (int rawIndex = 0; rawIndex < raw.Length; rawIndex++)
+                {
+                    string tid = raw[rawIndex];
+                    if (isEmptyPredicate(tid))
+                    {
+                        continue;
+                    }
+
+                    if (fill < expectedCount)
+                    {
+                        actualIndices[fill] = rawIndex;
+                        terrainIds[fill] = tid;
+                        fill++;
+                    }
+                    else
+                    {
+                        overflow = true;
+                        break;
+                    }
+                }
+            }
+
+            int tailEmptyCount = Math.Max(0, expectedCount - raw.Length);
+            int limit = Math.Min(raw.Length, expectedCount);
+            for (int i = limit - 1; i >= 0; i--)
+            {
+                string tid = raw[i];
+                if (!isEmptyPredicate(tid))
+                {
+                    break;
+                }
+                tailEmptyCount++;
+            }
+            tailEmptyCount = Mathf.Clamp(tailEmptyCount, 0, expectedCount);
+            int tailStartIndex = expectedCount - tailEmptyCount;
+            tailStartIndex = Mathf.Clamp(tailStartIndex, 0, expectedCount);
 
             if (fill < expectedCount)
             {
@@ -152,7 +203,7 @@ namespace DivineDragon.MapTools
                 }
             }
 
-            return new TerrainVirtualGrid(adapter, actualIndices, terrainIds);
+            return new TerrainVirtualGrid(adapter, actualIndices, terrainIds, tailStartIndex);
         }
 
         public string GetTerrainId(int x, int y)
@@ -174,6 +225,13 @@ namespace DivineDragon.MapTools
             }
             return actualIndices[virtualIndex];
         }
+
+        public bool IsTailIndex(int virtualIndex)
+        {
+            return virtualIndex >= tailStartIndex && virtualIndex < Width * Height;
+        }
+
+        public int TailStartIndex => tailStartIndex;
 
         private int GetVirtualIndex(int x, int y)
         {

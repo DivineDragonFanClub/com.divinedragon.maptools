@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using DivineDragon;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -178,6 +180,11 @@ namespace DivineDragon.MapTools
     
     public partial class TerrainPaintToolWindow : EditorWindow
     {
+        private const string GameDataRootPath = "/Users/doge/Documents/clean_engage_200/Data/StreamingAssets/aa/Switch";
+        private const string GameDataAssetRootPath = GameDataRootPath + "/fe_assets_gamedata";
+        private const string TerrainBundlesDirectory = GameDataAssetRootPath + "/terrains";
+        private const string TerrainXmlBundlePath = GameDataAssetRootPath + "/terrain.xml.bundle";
+
         private static TerrainPaintToolWindow instance;
         // External tools (e.g., Dispos tool) can lock painting while keeping visualization
         private static bool externalInteractionLock = false;
@@ -246,6 +253,9 @@ namespace DivineDragon.MapTools
         private static int brushSize = 1;
         private static Vector2Int hoveredTile = new Vector2Int(-1, -1);
         private static bool isMouseOverGrid = false;
+
+        private const string EmptyTerrainTid = "TID_無し";
+        private const string NoEntryTerrainId = "MTID_NoEntry";
         
         private const string PREFS_PREFIX = "TerrainPaintTool_";
         
@@ -273,6 +283,78 @@ namespace DivineDragon.MapTools
         private const float TILE_SIZE = 5f;
         private const float LABEL_ICON_SIZE = 8f;
         private const float LABEL_ICON_PADDING = 3f;
+
+        [MenuItem("Tools/Terrain/Extract All Terrain Bundles (Temp)")]
+        private static void ExtractAllTerrainBundlesTemp()
+        {
+            if (!Directory.Exists(TerrainBundlesDirectory))
+            {
+                EditorUtility.DisplayDialog(
+                    "Terrain Extraction",
+                    $"Terrain bundle directory not found:\n{TerrainBundlesDirectory}",
+                    "OK");
+                return;
+            }
+
+            string[] bundlePaths = Directory.GetFiles(TerrainBundlesDirectory, "*.bundle", SearchOption.TopDirectoryOnly);
+            Array.Sort(bundlePaths, StringComparer.OrdinalIgnoreCase);
+
+            var extractionTargets = new List<string>();
+            if (File.Exists(TerrainXmlBundlePath))
+            {
+                extractionTargets.Add(TerrainXmlBundlePath);
+            }
+
+            extractionTargets.AddRange(bundlePaths);
+
+            if (extractionTargets.Count == 0)
+            {
+                EditorUtility.DisplayDialog(
+                    "Terrain Extraction",
+                    "No terrain bundles found to extract.",
+                    "OK");
+                return;
+            }
+
+            bool success = false;
+            string exceptionMessage = null;
+
+            try
+            {
+                EditorUtility.DisplayProgressBar(
+                    "Terrain Extraction",
+                    $"Extracting {extractionTargets.Count} terrain assets...",
+                    0.5f);
+                success = Dumper.ExtractMultipleAssets(extractionTargets);
+            }
+            catch (Exception ex)
+            {
+                success = false;
+                exceptionMessage = ex.Message;
+                Debug.LogException(ex);
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+            }
+
+            AssetDatabase.Refresh();
+
+            if (!string.IsNullOrEmpty(exceptionMessage))
+            {
+                EditorUtility.DisplayDialog(
+                    "Terrain Extraction",
+                    $"Extraction failed with exception:\n{exceptionMessage}",
+                    "OK");
+                return;
+            }
+
+            string message = success
+                ? $"Queued {extractionTargets.Count} terrain assets for extraction.\nBundles sourced from:\n{TerrainBundlesDirectory}"
+                : "Extraction request reported a failure. Check the console for details.";
+
+            EditorUtility.DisplayDialog("Terrain Extraction", message, "OK");
+        }
         
         
         [MenuItem("Window/Terrain Paint Tool")]
@@ -573,6 +655,57 @@ namespace DivineDragon.MapTools
             {
                 Undo.RecordObject(terrain.Asset, label);
             }
+        }
+
+        private static string[] EnsureTerrainArrayCapacity(TerrainAssetAdapter terrain, string[] tiles, int expectedCount)
+        {
+            if (terrain == null || expectedCount <= 0)
+            {
+                return tiles ?? Array.Empty<string>();
+            }
+
+            int currentLength = tiles?.Length ?? 0;
+            if (currentLength >= expectedCount)
+            {
+                return tiles;
+            }
+
+            string[] newTiles = new string[expectedCount];
+            if (currentLength > 0)
+            {
+                Array.Copy(tiles, newTiles, currentLength);
+            }
+            for (int i = currentLength; i < expectedCount; i++)
+            {
+                newTiles[i] = EmptyTerrainTid;
+            }
+
+            terrain.m_Terrains = newTiles;
+            return newTiles;
+        }
+
+        private static bool ConvertTrailingEmptyToNoEntry(string[] tiles)
+        {
+            if (tiles == null || tiles.Length == 0)
+            {
+                return false;
+            }
+
+            bool changed = false;
+            for (int i = tiles.Length - 1; i >= 0; i--)
+            {
+                string tid = tiles[i];
+                if (!IsEmptyTerrain(tid))
+                {
+                    break;
+                }
+                if (tiles[i] != NoEntryTerrainId)
+                {
+                    tiles[i] = NoEntryTerrainId;
+                    changed = true;
+                }
+            }
+            return changed;
         }
 
         private static void MarkTerrainDirty(TerrainAssetAdapter terrain)
@@ -1832,8 +1965,12 @@ namespace DivineDragon.MapTools
             if (IsEmptyTerrain(selectedBrushTerrain) || selectedTerrain == null) return;
             TerrainVirtualGrid grid = GetVirtualGrid(selectedTerrain);
             if (grid == null) return;
+
+            int expectedCount = width * height;
+            if (expectedCount <= 0) return;
+
             var tiles = selectedTerrain.m_Terrains;
-            if (tiles == null) return;
+            tiles = EnsureTerrainArrayCapacity(selectedTerrain, tiles, expectedCount);
 
             int halfSize = (brushSize - 1) / 2;
             bool modified = false;
@@ -1846,10 +1983,39 @@ namespace DivineDragon.MapTools
                     int tileZ = centerTile.y + dz;
                     if (tileX >= 0 && tileX < width && tileZ >= 0 && tileZ < height)
                     {
+                        int virtualIndex = tileZ * width + tileX;
                         int actualIndex = grid.GetActualIndex(tileX, tileZ);
-                        if (actualIndex < 0 || actualIndex >= tiles.Length)
+                        bool isTailCell = grid.IsTailIndex(virtualIndex);
+
+                        if (actualIndex < 0)
                         {
-                            continue;
+                            if (!isTailCell)
+                            {
+                                continue;
+                            }
+
+                            tiles = EnsureTerrainArrayCapacity(selectedTerrain, tiles, expectedCount);
+                            if (virtualIndex >= tiles.Length)
+                            {
+                                continue;
+                            }
+                            if (ConvertTrailingEmptyToNoEntry(tiles))
+                            {
+                                modified = true;
+                            }
+                            actualIndex = virtualIndex;
+                        }
+                        else if (actualIndex >= tiles.Length)
+                        {
+                            tiles = EnsureTerrainArrayCapacity(selectedTerrain, tiles, expectedCount);
+                            if (actualIndex >= tiles.Length)
+                            {
+                                continue;
+                            }
+                            if (ConvertTrailingEmptyToNoEntry(tiles))
+                            {
+                                modified = true;
+                            }
                         }
 
                         if (!paintedIndicesThisDrag.Add(actualIndex))
@@ -1857,7 +2023,7 @@ namespace DivineDragon.MapTools
                             continue;
                         }
 
-                        if (IsEmptyTerrain(tiles[actualIndex]))
+                        if (IsEmptyTerrain(tiles[actualIndex]) && !isTailCell)
                         {
                             continue;
                         }
@@ -2075,16 +2241,35 @@ namespace DivineDragon.MapTools
                     {
                         if (grid != null)
                         {
+                            int virtualIndex = tileZ * width + tileX;
                             int actualIndex = grid.GetActualIndex(tileX, tileZ);
-                            if (actualIndex < 0 || actualIndex >= (selectedTerrain.m_Terrains?.Length ?? 0))
-                            {
-                                continue;
-                            }
+                            bool isTailCell = grid.IsTailIndex(virtualIndex);
 
-                            string tid = selectedTerrain.m_Terrains[actualIndex];
-                            if (IsEmptyTerrain(tid))
+                            if (actualIndex < 0)
                             {
-                                continue;
+                                if (!isTailCell)
+                                {
+                                    continue;
+                                }
+                            }
+                            else
+                            {
+                                int terrainLength = selectedTerrain.m_Terrains?.Length ?? 0;
+                                if (actualIndex >= terrainLength)
+                                {
+                                    if (!isTailCell)
+                                    {
+                                        continue;
+                                    }
+                                }
+                                else
+                                {
+                                    string tid = selectedTerrain.m_Terrains[actualIndex];
+                                    if (IsEmptyTerrain(tid) && !isTailCell)
+                                    {
+                                        continue;
+                                    }
+                                }
                             }
                         }
 
@@ -2115,16 +2300,35 @@ namespace DivineDragon.MapTools
                     {
                         if (grid != null)
                         {
+                            int virtualIndex = tileZ * width + tileX;
                             int actualIndex = grid.GetActualIndex(tileX, tileZ);
-                            if (actualIndex < 0 || actualIndex >= (selectedTerrain.m_Terrains?.Length ?? 0))
-                            {
-                                continue;
-                            }
+                            bool isTailCell = grid.IsTailIndex(virtualIndex);
 
-                            string tid = selectedTerrain.m_Terrains[actualIndex];
-                            if (IsEmptyTerrain(tid))
+                            if (actualIndex < 0)
                             {
-                                continue;
+                                if (!isTailCell)
+                                {
+                                    continue;
+                                }
+                            }
+                            else
+                            {
+                                int terrainLength = selectedTerrain.m_Terrains?.Length ?? 0;
+                                if (actualIndex >= terrainLength)
+                                {
+                                    if (!isTailCell)
+                                    {
+                                        continue;
+                                    }
+                                }
+                                else
+                                {
+                                    string tid = selectedTerrain.m_Terrains[actualIndex];
+                                    if (IsEmptyTerrain(tid) && !isTailCell)
+                                    {
+                                        continue;
+                                    }
+                                }
                             }
                         }
 

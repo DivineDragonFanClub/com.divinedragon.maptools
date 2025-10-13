@@ -80,9 +80,15 @@ namespace DivineDragon.MapTools
             // New dimensions
             EditorGUILayout.LabelField("New Dimensions", EditorStyles.miniBoldLabel);
             EditorGUI.BeginChangeCheck();
-            newTerrainWidth = EditorGUILayout.IntField("New Width", Mathf.Max(1, newTerrainWidth));
-            newTerrainHeight = EditorGUILayout.IntField("New Height", Mathf.Max(1, newTerrainHeight));
+            newTerrainWidth = EditorGUILayout.IntField("New Width", Mathf.Clamp(newTerrainWidth, 1, 32));
+            newTerrainHeight = EditorGUILayout.IntField("New Height", Mathf.Clamp(newTerrainHeight, 1, 32));
             bool resizeChanged = EditorGUI.EndChangeCheck();
+
+            // Show info if at max size
+            if (newTerrainWidth == 32 || newTerrainHeight == 32)
+            {
+                EditorGUILayout.HelpBox("Maps are limited to 32x32 (official max size). Padding uses MTID_NoEntry to distinguish from official maps.", MessageType.Info);
+            }
             
             // Calculate size change
             int widthChange = newTerrainWidth - selectedTerrain.m_Width;
@@ -337,31 +343,16 @@ namespace DivineDragon.MapTools
             
             int oldWidth = selectedTerrain.m_Width;
             int oldHeight = selectedTerrain.m_Height;
-            string[] oldTerrains = selectedTerrain.m_Terrains;
-            
-            // Create 2D representation of old data
-            string[,] oldGrid = new string[oldHeight, oldWidth];
-            for (int y = 0; y < oldHeight; y++)
+            int expectedOldCount = Mathf.Max(0, oldWidth * oldHeight);
+            string[] sourceTiles = EnsureTerrainArrayCapacity(selectedTerrain, selectedTerrain.m_Terrains, expectedOldCount);
+            if (sourceTiles == null)
             {
-                for (int x = 0; x < oldWidth; x++)
-                {
-                    int index = y * oldWidth + x;
-                    if (index < oldTerrains.Length)
-                    {
-                        oldGrid[y, x] = oldTerrains[index];
-                    }
-                }
+                sourceTiles = Array.Empty<string>();
             }
-            
-            // Create new grid with MTID_Nothing as default
-            string[,] newGrid = new string[newTerrainHeight, newTerrainWidth];
-            for (int y = 0; y < newTerrainHeight; y++)
-            {
-                for (int x = 0; x < newTerrainWidth; x++)
-                {
-                    newGrid[y, x] = "MTID_Nothing";
-                }
-            }
+
+            // Rebuild virtual grid with the ensured backing array so we can map tiles reliably
+            TerrainVirtualGridCache.Invalidate(selectedTerrain);
+            TerrainVirtualGrid oldGrid = TerrainVirtualGridCache.GetGrid(selectedTerrain);
             
             // Calculate offsets based on expand/shrink direction
             int offsetX = 0;
@@ -412,7 +403,49 @@ namespace DivineDragon.MapTools
                 }
             }
             
-            // Copy old data to new grid with offset
+            // Prepare the target array, seeding everything with MTID_NoEntry for cleaner padding
+            int newCount = Mathf.Max(0, newTerrainWidth * newTerrainHeight);
+            string[] newTerrains = new string[newCount];
+            for (int i = 0; i < newCount; i++)
+            {
+                newTerrains[i] = NoEntryTerrainId;
+            }
+
+            string ResolveOldTile(int x, int y)
+            {
+                string tileValue = NoEntryTerrainId;
+
+                if (oldGrid != null)
+                {
+                    int actualIndex = oldGrid.GetActualIndex(x, y);
+                    if (actualIndex >= 0 && actualIndex < sourceTiles.Length)
+                    {
+                        tileValue = sourceTiles[actualIndex];
+                    }
+                }
+
+                if (string.IsNullOrEmpty(tileValue))
+                {
+                    int fallbackIndex = y * oldWidth + x;
+                    if (fallbackIndex >= 0 && fallbackIndex < sourceTiles.Length)
+                    {
+                        string fallback = sourceTiles[fallbackIndex];
+                        if (!string.IsNullOrEmpty(fallback))
+                        {
+                            tileValue = fallback;
+                        }
+                    }
+                }
+
+                if (string.IsNullOrEmpty(tileValue))
+                {
+                    tileValue = NoEntryTerrainId;
+                }
+
+                return tileValue;
+            }
+
+            // Copy old data to new grid with offset using resolved tile values
             for (int y = 0; y < oldHeight; y++)
             {
                 for (int x = 0; x < oldWidth; x++)
@@ -423,21 +456,16 @@ namespace DivineDragon.MapTools
                     if (newX >= 0 && newX < newTerrainWidth && 
                         newY >= 0 && newY < newTerrainHeight)
                     {
-                        newGrid[newY, newX] = oldGrid[y, x];
+                        string tileValue = ResolveOldTile(x, y);
+                        int destIndex = newY * newTerrainWidth + newX;
+                        if (destIndex >= 0 && destIndex < newTerrains.Length)
+                        {
+                            newTerrains[destIndex] = tileValue;
+                        }
                     }
                 }
             }
-            
-            // Convert back to 1D array
-            string[] newTerrains = new string[newTerrainWidth * newTerrainHeight];
-            for (int y = 0; y < newTerrainHeight; y++)
-            {
-                for (int x = 0; x < newTerrainWidth; x++)
-                {
-                    newTerrains[y * newTerrainWidth + x] = newGrid[y, x];
-                }
-            }
-            
+
             // Apply changes to terrain
             selectedTerrain.m_Width = newTerrainWidth;
             selectedTerrain.m_Height = newTerrainHeight;
@@ -453,31 +481,73 @@ namespace DivineDragon.MapTools
         private static void MirrorTerrainHorizontal()
         {
             if (selectedTerrain == null) return;
-            
+
             RecordTerrainUndo(selectedTerrain, "Mirror Terrain Horizontal");
-            
+
             int width = selectedTerrain.m_Width;
             int height = selectedTerrain.m_Height;
-            string[] terrains = selectedTerrain.m_Terrains;
-            
-            // Create mirrored array
-            string[] mirrored = new string[terrains.Length];
-            
+            string[] originalTerrains = selectedTerrain.m_Terrains;
+
+            // Step 1: Extract content using virtual grid (handles padded maps correctly)
+            TerrainVirtualGridCache.Invalidate(selectedTerrain);
+            TerrainVirtualGrid grid = TerrainVirtualGridCache.GetGrid(selectedTerrain);
+
+            // Extract all tiles from the virtual grid
+            string[] content = new string[width * height];
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    content[y * width + x] = grid.GetTerrainId(x, y);
+                }
+            }
+
+            // Step 2: Transform - Mirror the content horizontally
+            string[] mirroredContent = new string[width * height];
             for (int y = 0; y < height; y++)
             {
                 for (int x = 0; x < width; x++)
                 {
                     int srcIndex = y * width + x;
                     int destIndex = y * width + (width - 1 - x);
-                    
-                    if (srcIndex < terrains.Length)
+                    mirroredContent[destIndex] = content[srcIndex];
+                }
+            }
+
+            // Step 3: Rebuild with padding if needed
+            string[] result;
+            bool isOfficialPaddedMap = originalTerrains.Length == 1024 && (width < 32 || height < 32);
+
+            if (isOfficialPaddedMap)
+            {
+                // Rebuild as a padded 32x32 array
+                result = new string[1024];
+
+                // Fill everything with padding first
+                for (int i = 0; i < 1024; i++)
+                {
+                    result[i] = EmptyTerrainTid;
+                }
+
+                // Place the mirrored content at the correct positions
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
                     {
-                        mirrored[destIndex] = terrains[srcIndex];
+                        int contentIndex = y * width + x;
+                        int paddedIndex = y * 32 + x;
+                        result[paddedIndex] = mirroredContent[contentIndex];
                     }
                 }
             }
-            
-            selectedTerrain.m_Terrains = mirrored;
+            else
+            {
+                // Use the mirrored content directly for non-padded maps
+                result = mirroredContent;
+            }
+
+            selectedTerrain.m_Terrains = result;
+            InvalidateVirtualGrid(selectedTerrain);
             MarkTerrainDirty(selectedTerrain);
             s_LabelNodes.Clear();
 
@@ -488,34 +558,76 @@ namespace DivineDragon.MapTools
         private static void MirrorTerrainVertical()
         {
             if (selectedTerrain == null) return;
-            
+
             RecordTerrainUndo(selectedTerrain, "Mirror Terrain Vertical");
-            
+
             int width = selectedTerrain.m_Width;
             int height = selectedTerrain.m_Height;
-            string[] terrains = selectedTerrain.m_Terrains;
-            
-            // Create mirrored array
-            string[] mirrored = new string[terrains.Length];
-            
+            string[] originalTerrains = selectedTerrain.m_Terrains;
+
+            // Step 1: Extract content using virtual grid (handles padded maps correctly)
+            TerrainVirtualGridCache.Invalidate(selectedTerrain);
+            TerrainVirtualGrid grid = TerrainVirtualGridCache.GetGrid(selectedTerrain);
+
+            // Extract all tiles from the virtual grid
+            string[] content = new string[width * height];
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    content[y * width + x] = grid.GetTerrainId(x, y);
+                }
+            }
+
+            // Step 2: Transform - Mirror the content vertically
+            string[] mirroredContent = new string[width * height];
             for (int y = 0; y < height; y++)
             {
                 for (int x = 0; x < width; x++)
                 {
                     int srcIndex = y * width + x;
                     int destIndex = (height - 1 - y) * width + x;
-                    
-                    if (srcIndex < terrains.Length)
+                    mirroredContent[destIndex] = content[srcIndex];
+                }
+            }
+
+            // Step 3: Rebuild with padding if needed
+            string[] result;
+            bool isOfficialPaddedMap = originalTerrains.Length == 1024 && (width < 32 || height < 32);
+
+            if (isOfficialPaddedMap)
+            {
+                // Rebuild as a padded 32x32 array
+                result = new string[1024];
+
+                // Fill everything with padding first
+                for (int i = 0; i < 1024; i++)
+                {
+                    result[i] = EmptyTerrainTid;
+                }
+
+                // Place the mirrored content at the correct positions
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
                     {
-                        mirrored[destIndex] = terrains[srcIndex];
+                        int contentIndex = y * width + x;
+                        int paddedIndex = y * 32 + x;
+                        result[paddedIndex] = mirroredContent[contentIndex];
                     }
                 }
             }
-            
-            selectedTerrain.m_Terrains = mirrored;
+            else
+            {
+                // Use the mirrored content directly for non-padded maps
+                result = mirroredContent;
+            }
+
+            selectedTerrain.m_Terrains = result;
+            InvalidateVirtualGrid(selectedTerrain);
             MarkTerrainDirty(selectedTerrain);
             s_LabelNodes.Clear();
-            
+
             SceneView.RepaintAll();
             Debug.Log("Terrain mirrored vertically");
         }
@@ -523,41 +635,80 @@ namespace DivineDragon.MapTools
         private static void ShiftTerrainHorizontal(int amount)
         {
             if (selectedTerrain == null) return;
-            
+
             RecordTerrainUndo(selectedTerrain, $"Shift Terrain {(amount > 0 ? "Right" : "Left")}");
-            
+
             int width = selectedTerrain.m_Width;
             int height = selectedTerrain.m_Height;
-            string[] terrains = selectedTerrain.m_Terrains;
-            
-            // Create shifted array, fill with MTID_Nothing by default
-            string[] shifted = new string[terrains.Length];
-            for (int i = 0; i < shifted.Length; i++)
-            {
-                shifted[i] = "MTID_Nothing";
-            }
-            
-            // Copy data to shifted positions
+            string[] originalTerrains = selectedTerrain.m_Terrains;
+
+            // Step 1: Extract content using virtual grid
+            TerrainVirtualGridCache.Invalidate(selectedTerrain);
+            TerrainVirtualGrid grid = TerrainVirtualGridCache.GetGrid(selectedTerrain);
+
+            string[] content = new string[width * height];
             for (int y = 0; y < height; y++)
             {
                 for (int x = 0; x < width; x++)
                 {
-                    int srcIndex = y * width + x;
+                    content[y * width + x] = grid.GetTerrainId(x, y);
+                }
+            }
+
+            // Step 2: Transform - Shift the content horizontally
+            string[] shiftedContent = new string[width * height];
+            // Initialize with MTID_Nothing for areas that will be empty after shift
+            for (int i = 0; i < shiftedContent.Length; i++)
+            {
+                shiftedContent[i] = "MTID_Nothing";
+            }
+
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
                     int newX = x + amount;
-                    
-                    // Only copy if the new position is within bounds
-                    if (newX >= 0 && newX < width && srcIndex < terrains.Length)
+                    if (newX >= 0 && newX < width)
                     {
+                        int srcIndex = y * width + x;
                         int destIndex = y * width + newX;
-                        shifted[destIndex] = terrains[srcIndex];
+                        shiftedContent[destIndex] = content[srcIndex];
                     }
                 }
             }
-            
-            selectedTerrain.m_Terrains = shifted;
+
+            // Step 3: Rebuild with padding if needed
+            string[] result;
+            bool isOfficialPaddedMap = originalTerrains.Length == 1024 && (width < 32 || height < 32);
+
+            if (isOfficialPaddedMap)
+            {
+                result = new string[1024];
+                for (int i = 0; i < 1024; i++)
+                {
+                    result[i] = EmptyTerrainTid;
+                }
+
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        int contentIndex = y * width + x;
+                        int paddedIndex = y * 32 + x;
+                        result[paddedIndex] = shiftedContent[contentIndex];
+                    }
+                }
+            }
+            else
+            {
+                result = shiftedContent;
+            }
+
+            selectedTerrain.m_Terrains = result;
+            InvalidateVirtualGrid(selectedTerrain);
             MarkTerrainDirty(selectedTerrain);
             s_LabelNodes.Clear();
-            
+
             SceneView.RepaintAll();
             Debug.Log($"Terrain shifted horizontally by {amount}");
         }
@@ -565,41 +716,80 @@ namespace DivineDragon.MapTools
         private static void ShiftTerrainVertical(int amount)
         {
             if (selectedTerrain == null) return;
-            
+
             RecordTerrainUndo(selectedTerrain, $"Shift Terrain {(amount > 0 ? "Down" : "Up")}");
-            
+
             int width = selectedTerrain.m_Width;
             int height = selectedTerrain.m_Height;
-            string[] terrains = selectedTerrain.m_Terrains;
-            
-            // Create shifted array, fill with MTID_Nothing by default
-            string[] shifted = new string[terrains.Length];
-            for (int i = 0; i < shifted.Length; i++)
-            {
-                shifted[i] = "MTID_Nothing";
-            }
-            
-            // Copy data to shifted positions
+            string[] originalTerrains = selectedTerrain.m_Terrains;
+
+            // Step 1: Extract content using virtual grid
+            TerrainVirtualGridCache.Invalidate(selectedTerrain);
+            TerrainVirtualGrid grid = TerrainVirtualGridCache.GetGrid(selectedTerrain);
+
+            string[] content = new string[width * height];
             for (int y = 0; y < height; y++)
             {
                 for (int x = 0; x < width; x++)
                 {
-                    int srcIndex = y * width + x;
+                    content[y * width + x] = grid.GetTerrainId(x, y);
+                }
+            }
+
+            // Step 2: Transform - Shift the content vertically
+            string[] shiftedContent = new string[width * height];
+            // Initialize with MTID_Nothing for areas that will be empty after shift
+            for (int i = 0; i < shiftedContent.Length; i++)
+            {
+                shiftedContent[i] = "MTID_Nothing";
+            }
+
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
                     int newY = y + amount;
-                    
-                    // Only copy if the new position is within bounds
-                    if (newY >= 0 && newY < height && srcIndex < terrains.Length)
+                    if (newY >= 0 && newY < height)
                     {
+                        int srcIndex = y * width + x;
                         int destIndex = newY * width + x;
-                        shifted[destIndex] = terrains[srcIndex];
+                        shiftedContent[destIndex] = content[srcIndex];
                     }
                 }
             }
-            
-            selectedTerrain.m_Terrains = shifted;
+
+            // Step 3: Rebuild with padding if needed
+            string[] result;
+            bool isOfficialPaddedMap = originalTerrains.Length == 1024 && (width < 32 || height < 32);
+
+            if (isOfficialPaddedMap)
+            {
+                result = new string[1024];
+                for (int i = 0; i < 1024; i++)
+                {
+                    result[i] = EmptyTerrainTid;
+                }
+
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        int contentIndex = y * width + x;
+                        int paddedIndex = y * 32 + x;
+                        result[paddedIndex] = shiftedContent[contentIndex];
+                    }
+                }
+            }
+            else
+            {
+                result = shiftedContent;
+            }
+
+            selectedTerrain.m_Terrains = result;
+            InvalidateVirtualGrid(selectedTerrain);
             MarkTerrainDirty(selectedTerrain);
             s_LabelNodes.Clear();
-            
+
             SceneView.RepaintAll();
             Debug.Log($"Terrain shifted vertically by {amount}");
         }
