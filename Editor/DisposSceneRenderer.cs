@@ -18,6 +18,9 @@ namespace DivineDragon.MapTools
         private DisposEntry selectedEntry;
         private DisposEntry hoverEntry; // transient highlight from picker
         private Dictionary<Vector2Int, DisposEntry> tileTopEntries = new Dictionary<Vector2Int, DisposEntry>(); // Track which entry should be on top for each tile
+        private readonly Dictionary<Vector2Int, int> tempTileCounts = new Dictionary<Vector2Int, int>(); // frame-local cache to curb GC
+        private readonly HashSet<Vector2Int> tempStackTiles = new HashSet<Vector2Int>();                // tracks tiles requiring stack badges
+        private readonly List<DisposEntry> tempEntriesToDrawLater = new List<DisposEntry>();             // hover/top entries drawn after base pass
         private bool hasSelectedTile = false;
         private Vector2Int selectedTile;
         private Vector3 worldOffset = Vector3.zero;
@@ -218,6 +221,10 @@ namespace DivineDragon.MapTools
             if (currentDocument == null)
                 return;
 
+            tempTileCounts.Clear();
+            tempStackTiles.Clear();
+            tempEntriesToDrawLater.Clear();
+
             Vector3 offset = TerrainPaintToolWindow.GetWorldOffset();
             if (currentTerrain != null)
             {
@@ -225,17 +232,13 @@ namespace DivineDragon.MapTools
             }
             worldOffset = offset;
             
-            if (showGrid)
+            if (showGrid && !TerrainPaintToolWindow.ShouldRenderTerrainGrid())
                 DrawGrid();
             
             var prevZTest = Handles.zTest;
             Handles.zTest = UnityEngine.Rendering.CompareFunction.Always;
 
             // Track tiles that need a stack badge
-            var tilesWithStacks = new HashSet<Vector2Int>();
-            var drawnEntries = new HashSet<DisposEntry>();
-            var entriesToDrawLater = new List<DisposEntry>();
-
             // First pass: draw all entries except those that should be on top.
             // If a hovered entry exists on a tile, treat it as tile-top for this frame
             // so its plate/icon render on top even when stacked.
@@ -246,28 +249,35 @@ namespace DivineDragon.MapTools
                 {
                     if (entry.IsGroupHeader) continue;
                     if (!IsEntryVisible(entry)) continue;
+
+                    var tile = new Vector2Int(entry.DisposX, entry.DisposY);
+                    if (tempTileCounts.TryGetValue(tile, out var existing))
+                    {
+                        existing += 1;
+                        tempTileCounts[tile] = existing;
+                        if (existing > 1) tempStackTiles.Add(tile);
+                    }
+                    else
+                    {
+                        tempTileCounts[tile] = 1;
+                    }
+
                     if (entry == selectedEntry) continue; // Selected always drawn last
                     
                     // Check if this entry should be on top of its tile
-                    var tile = new Vector2Int(entry.DisposX, entry.DisposY);
                     if (IsEntryTopForTile(entry))
                     {
-                        entriesToDrawLater.Add(entry);
+                        tempEntriesToDrawLater.Add(entry);
                         continue;
                     }
                     
                     DrawUnitPlate(entry);
                     DrawUnitGUI(entry);
-                    drawnEntries.Add(entry);
-
-                    // Record tiles with multiple entries for badge drawing after all units
-                    int count = GetEntriesOnTile(tile.x, tile.y).Count;
-                    if (count > 1) tilesWithStacks.Add(tile);
                 }
             }
 
             // Second pass: draw tile-top entries (hovered entries and persistent tops), but not selected
-            foreach (var entry in entriesToDrawLater)
+            foreach (var entry in tempEntriesToDrawLater)
             {
                 if (entry != selectedEntry)
                 {
@@ -323,10 +333,12 @@ namespace DivineDragon.MapTools
             }
 
             // Draw all stack badges on top of icons
-            foreach (var tile in tilesWithStacks)
+            foreach (var tile in tempStackTiles)
             {
-                int count = GetEntriesOnTile(tile.x, tile.y).Count;
-                if (count > 1) DrawStackBadge(tile, count);
+                if (tempTileCounts.TryGetValue(tile, out var count) && count > 1)
+                {
+                    DrawStackBadge(tile, count);
+                }
             }
 
             Handles.zTest = prevZTest;

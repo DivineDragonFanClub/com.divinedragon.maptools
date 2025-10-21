@@ -93,6 +93,37 @@ namespace DivineDragon.MapTools
 
         private enum DisposOverlayMode { Hide, Show, Edit }
         private DisposOverlayMode overlayMode = DisposOverlayMode.Edit;
+        private SharedEditorMode? previousSharedMode = null;
+
+        private void RefreshSharedEditorModeLock()
+        {
+            var currentShared = TerrainPaintToolWindow.GetSharedEditorMode();
+            if (overlayMode == DisposOverlayMode.Edit)
+            {
+                if (!previousSharedMode.HasValue && currentShared != SharedEditorMode.Dispos)
+                {
+                    previousSharedMode = currentShared;
+                }
+                if (currentShared != SharedEditorMode.Dispos)
+                {
+                    TerrainPaintToolWindow.SetSharedEditorMode(SharedEditorMode.Dispos);
+                }
+            }
+            else
+            {
+                ReleaseSharedEditorModeLock();
+            }
+        }
+
+        private void ReleaseSharedEditorModeLock()
+        {
+            var currentShared = TerrainPaintToolWindow.GetSharedEditorMode();
+            if (previousSharedMode.HasValue && currentShared == SharedEditorMode.Dispos)
+            {
+                TerrainPaintToolWindow.SetSharedEditorMode(previousSharedMode.Value);
+            }
+            previousSharedMode = null;
+        }
         
         [MenuItem("Window/Dispos Tool")]
         public static void ShowWindow()
@@ -142,7 +173,7 @@ namespace DivineDragon.MapTools
             sceneRenderer.SetShowSimplifiedNames(showSimplifiedNames);
 
             // Reflect current overlay mode in TerrainPaint tool
-            TerrainPaintToolWindow.SetExternalInteractionLocked(overlayMode == DisposOverlayMode.Edit);
+            RefreshSharedEditorModeLock();
             
             RefreshFileList();
             
@@ -171,7 +202,7 @@ namespace DivineDragon.MapTools
             Tools.hidden = false;
 
             // Release any external locks
-            TerrainPaintToolWindow.SetExternalInteractionLocked(false);
+            ReleaseSharedEditorModeLock();
 
             if (sceneRenderer != null)
             {
@@ -352,7 +383,7 @@ namespace DivineDragon.MapTools
             if (EditorGUI.EndChangeCheck())
             {
                 overlayMode = (DisposOverlayMode)newMode;
-                TerrainPaintToolWindow.SetExternalInteractionLocked(overlayMode == DisposOverlayMode.Edit);
+                RefreshSharedEditorModeLock();
                 if (overlayMode == DisposOverlayMode.Hide)
                 {
                     sceneRenderer.Cleanup();
@@ -1305,6 +1336,16 @@ namespace DivineDragon.MapTools
         {
             if (sceneRenderer != null && currentDocument != null)
             {
+                var sharedMode = TerrainPaintToolWindow.GetSharedEditorMode();
+                if (sharedMode == SharedEditorMode.Off)
+                {
+                    if (Tools.hidden)
+                    {
+                        Tools.hidden = false;
+                    }
+                    return;
+                }
+
                 if (overlayMode != DisposOverlayMode.Hide)
                 {
                     // Reposition picker to follow camera movement

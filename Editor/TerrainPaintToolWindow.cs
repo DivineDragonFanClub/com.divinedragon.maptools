@@ -23,6 +23,13 @@ namespace DivineDragon.MapTools
         ShowName,
         ShowBoth
     }
+
+    public enum SharedEditorMode
+    {
+        Dispos,
+        Terrain,
+        Off
+    }
     
     // Class to represent a connected group of terrain tiles
     public class TerrainIsland
@@ -187,7 +194,7 @@ namespace DivineDragon.MapTools
 
         private static TerrainPaintToolWindow instance;
         // External tools (e.g., Dispos tool) can lock painting while keeping visualization
-        private static bool externalInteractionLock = false;
+        private static SharedEditorMode sharedMode = SharedEditorMode.Terrain;
         private static TerrainAssetAdapter selectedTerrain;
         private static bool visualizationEnabled = true;
         private static bool showGridLines = true;
@@ -364,10 +371,52 @@ namespace DivineDragon.MapTools
             instance.minSize = new Vector2(300, 400);
         }
 
-        // Called by other editor tools to prevent terrain edits while keeping colors visible
+        public static SharedEditorMode GetSharedEditorMode() => sharedMode;
+
+        public static void SetSharedEditorMode(SharedEditorMode mode)
+        {
+            if (sharedMode == mode)
+            {
+                return;
+            }
+
+            sharedMode = mode;
+            if (mode != SharedEditorMode.Terrain)
+            {
+                if (isPaintingStroke)
+                {
+                    EndPaintStroke();
+                }
+                paintMode = false;
+            }
+
+            SceneView.RepaintAll();
+            DisposToolWindow.RequestRepaintAll(repaintScene: mode != SharedEditorMode.Off);
+        }
+
+        public static bool IsTerrainEditingEnabled => sharedMode == SharedEditorMode.Terrain;
+
+        public static bool ShouldRenderTerrainOverlay()
+        {
+            return sharedMode != SharedEditorMode.Off && visualizationEnabled && selectedTerrain != null;
+        }
+
+        public static bool ShouldRenderTerrainGrid()
+        {
+            return sharedMode != SharedEditorMode.Off && visualizationEnabled && showGridLines && selectedTerrain != null;
+        }
+
+        // Legacy bridge for existing callers
         public static void SetExternalInteractionLocked(bool locked)
         {
-            externalInteractionLock = locked;
+            if (locked)
+            {
+                SetSharedEditorMode(SharedEditorMode.Dispos);
+            }
+            else if (sharedMode == SharedEditorMode.Dispos)
+            {
+                SetSharedEditorMode(SharedEditorMode.Terrain);
+            }
         }
         
         private void OnEnable()
@@ -874,6 +923,15 @@ namespace DivineDragon.MapTools
             EditorGUILayout.LabelField("Terrain Paint Tool", EditorStyles.boldLabel);
             EditorGUILayout.Space(5);
 
+            EditorGUILayout.LabelField("Editor Mode", EditorStyles.miniBoldLabel);
+            EditorGUI.BeginChangeCheck();
+            int modeIndex = GUILayout.Toolbar((int)sharedMode, new[] { "Dispos", "Terrain", "Off" });
+            if (EditorGUI.EndChangeCheck())
+            {
+                SetSharedEditorMode((SharedEditorMode)modeIndex);
+            }
+            EditorGUILayout.Space(6);
+
             // Top-level tabs
             uiTabIndex = GUILayout.Toolbar(uiTabIndex, new[] { "Main", "Settings", "Advanced" });
             EditorGUILayout.Space(6);
@@ -1153,10 +1211,11 @@ namespace DivineDragon.MapTools
                 EditorGUILayout.Space(10);
                 EditorGUILayout.LabelField("Terrain Painting", EditorStyles.boldLabel);
                     
-                    EditorGUI.BeginChangeCheck();
+                EditorGUI.BeginChangeCheck();
                     
-                    // Disable painting controls if visualization is off
-                    EditorGUI.BeginDisabledGroup(!visualizationEnabled);
+                    bool terrainModeActive = IsTerrainEditingEnabled;
+                    bool disablePaintingControls = !visualizationEnabled || !terrainModeActive;
+                    EditorGUI.BeginDisabledGroup(disablePaintingControls);
                     
                     GUI.backgroundColor = paintMode ? Color.green : Color.white;
                     if (GUILayout.Button(paintMode ? "Exit Paint Mode" : "Enter Paint Mode"))
@@ -1334,6 +1393,10 @@ namespace DivineDragon.MapTools
                     }
                     
                     EditorGUI.EndDisabledGroup(); // End disable group for visualization check
+                    if (!terrainModeActive && GetSharedEditorMode() == SharedEditorMode.Dispos)
+                    {
+                        EditorGUILayout.HelpBox("Terrain editing is disabled while the Dispos editor is active. Switch the mode toggle to Terrain to paint.", MessageType.Info);
+                    }
                     
                     if (EditorGUI.EndChangeCheck())
                     {
@@ -1409,6 +1472,18 @@ namespace DivineDragon.MapTools
 
         private static void OnSceneGUI(SceneView sceneView)
         {
+            if (sharedMode == SharedEditorMode.Off)
+            {
+                if (isPaintingStroke)
+                {
+                    EndPaintStroke();
+                }
+                isMouseOverGrid = false;
+                hoveredTile = new Vector2Int(-1, -1);
+                PruneMeshCaches(selectedTerrain);
+                return;
+            }
+
             if (!visualizationEnabled || selectedTerrain == null)
             {
                 PruneMeshCaches(selectedTerrain);
@@ -1851,7 +1926,7 @@ namespace DivineDragon.MapTools
         private static void HandleMouseInput(int width, int height, float startX, float startZ, float basePlaneY, TerrainHeightSettings heightSettings)
         {
             Event currentEvent = Event.current;
-            if (externalInteractionLock)
+            if (!IsTerrainEditingEnabled)
             {
                 isMouseOverGrid = false;
                 hoveredTile = new Vector2Int(-1, -1);
@@ -1914,7 +1989,7 @@ namespace DivineDragon.MapTools
             hoveredTile = new Vector2Int(gridX, gridZ);
             isMouseOverGrid = true;
 
-            if (paintMode && !externalInteractionLock)
+            if (paintMode && IsTerrainEditingEnabled)
             {
                 if (currentEvent.type == EventType.MouseDown || currentEvent.type == EventType.MouseDrag || currentEvent.type == EventType.MouseUp)
                 {
