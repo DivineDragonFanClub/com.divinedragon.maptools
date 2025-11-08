@@ -288,7 +288,7 @@ namespace DivineDragon.MapTools
         private const float LABEL_ICON_SIZE = 8f;
         private const float LABEL_ICON_PADDING = 3f;
 
-        [MenuItem("Tools/Map/Terrain Paint Tool")]
+        [MenuItem("Map Tools/Terrain Paint Tool")]
         public static void ShowWindow()
         {
             instance = GetWindow<TerrainPaintToolWindow>("Terrain Paint Tool");
