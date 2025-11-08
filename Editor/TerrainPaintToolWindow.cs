@@ -214,7 +214,7 @@ namespace DivineDragon.MapTools
         // Label display is always Labels mode (no chips)
         private static float colorOpacity = 0.5f;
         private static float colorBrightness = 1.0f;
-        private static TextDisplayMode textDisplayMode = TextDisplayMode.ShowTID;
+        private static TextDisplayMode textDisplayMode = TextDisplayMode.ShowName;
         
         // Island caching for smooth transitions
         private static readonly Dictionary<TerrainAssetAdapter, List<TerrainIsland>> islandCache = new Dictionary<TerrainAssetAdapter, List<TerrainIsland>>();
@@ -224,15 +224,15 @@ namespace DivineDragon.MapTools
         
         // Screen-space relaxation state/tunables
         private static Dictionary<string, LabelNode> s_LabelNodes = new Dictionary<string, LabelNode>();
-        private static bool relaxEnabled = true;
-        private static int relaxIterations = 1;          // committed default
-        private static float relaxAnchorK = 0.05f;       // committed default
-        private static float relaxMaxStepPx = 3.0f;
-        private static float relaxRadiusPxBase = 40f;
-        private static bool relaxFreezeWhileMoving = true; // preserve offsets while moving
-        private static int relaxLargeIslandTiles = 80;
-        private static float relaxPriorityLarge = 1.6f;
-        private static float relaxViewportPad = 8f;
+        private const bool RelaxEnabled = true;
+        private const int RelaxIterations = 1;
+        private const float RelaxAnchorK = 0.05f;
+        private const float RelaxMaxStepPx = 3.0f;
+        private const float RelaxRadiusPxBase = 40f;
+        private const bool RelaxFreezeWhileMoving = true;
+        private const int RelaxLargeIslandTiles = 80;
+        private const float RelaxPriorityLarge = 1.6f;
+        private const float RelaxViewportPad = 8f;
 
         // Camera movement detection
         private static Vector3 lastCameraPosition;
@@ -281,9 +281,6 @@ namespace DivineDragon.MapTools
         // Relaxation settings are committed defaults; no EditorPrefs persistence
         
         private Vector2 scrollPosition;
-        private readonly List<TerrainAssetAdapter> availableTerrains = new List<TerrainAssetAdapter>();
-        private string[] terrainNames;
-        private int selectedIndex = -1;
         private Vector2 paletteScrollPosition;
         private string terrainSearchFilter = "";
         
@@ -432,7 +429,6 @@ namespace DivineDragon.MapTools
             EditorApplication.hierarchyChanged += OnHierarchyChanged;
             InvalidateSceneColliderLists();
             LoadSettings();
-            RefreshTerrainList();
         }
         
         private static void OnUndoRedo()
@@ -866,32 +862,6 @@ namespace DivineDragon.MapTools
             // Relaxation: committed defaults (no prefs save)
         }
         
-        private void RefreshTerrainList()
-        {
-            availableTerrains.Clear();
-            
-            string[] guids = AssetDatabase.FindAssets("t:MapTerrain");
-            foreach (string guid in guids)
-            {
-                string path = AssetDatabase.GUIDToAssetPath(guid);
-                TerrainAssetAdapter terrain = TerrainAssetAdapter.Load(path);
-                if (terrain != null && terrain.IsValid)
-                {
-                    availableTerrains.Add(terrain);
-                }
-            }
-            
-            terrainNames = new string[availableTerrains.Count];
-            selectedIndex = -1;
-            for (int i = 0; i < availableTerrains.Count; i++)
-            {
-                terrainNames[i] = availableTerrains[i].Name;
-                if (selectedTerrain != null && selectedTerrain.Equals(availableTerrains[i]))
-                {
-                    selectedIndex = i;
-                }
-            }
-        }
         
         private static int uiTabIndex = 0; // 0 = Main, 1 = Settings, 2 = Advanced
 
@@ -949,39 +919,11 @@ namespace DivineDragon.MapTools
                     TerrainRegionCache.ClearAll();
                     s_LabelNodes.Clear();
                     labelAlphaStates.Clear();
-                    for (int i = 0; i < availableTerrains.Count; i++)
-                    {
-                        if (selectedTerrain != null &&
-                            availableTerrains[i]?.Asset == selectedTerrain.Asset)
-                        {
-                            selectedIndex = i;
-                            break;
-                        }
-                    }
                     SaveSettings();
                     SceneView.RepaintAll();
                 }
                 
                 EditorGUILayout.Space(5);
-                
-                if (GUILayout.Button("Refresh Terrain List"))
-                {
-                    RefreshTerrainList();
-                }
-                
-                if (availableTerrains.Count > 0)
-                {
-                    EditorGUI.BeginChangeCheck();
-                    selectedIndex = EditorGUILayout.Popup("Quick Select", selectedIndex, terrainNames);
-                    if (EditorGUI.EndChangeCheck() && selectedIndex >= 0 && selectedIndex < availableTerrains.Count)
-                    {
-                        selectedTerrain = availableTerrains[selectedIndex];
-                        PruneMeshCaches(selectedTerrain);
-                        ApplyTerrainHeightForSelection();
-                        SaveSettings();
-                        SceneView.RepaintAll();
-                    }
-                }
                 
                 if (selectedTerrain != null)
                 {
@@ -1184,6 +1126,18 @@ namespace DivineDragon.MapTools
             {
                 EditorGUILayout.Space(10);
                 EditorGUILayout.LabelField("Terrain Painting", EditorStyles.boldLabel);
+
+                if (!TerrainDefinitions.HasDefinitions)
+                {
+                    EditorGUILayout.HelpBox(
+                        $"Terrain definitions are missing. Extract {TerrainDefinitions.TerrainXmlAssetRelativePath} so palette colors and names load correctly.",
+                        MessageType.Warning);
+                    if (GUILayout.Button("Extract Terrain.xml"))
+                    {
+                        ExtractTerrainXml();
+                    }
+                    EditorGUILayout.Space(5);
+                }
                     
                 EditorGUI.BeginChangeCheck();
                     
@@ -1717,16 +1671,16 @@ namespace DivineDragon.MapTools
                             node.seenThisFrame = true;
 
                             node.posGui = anchorGui;
-                            if (relaxEnabled)
+                            if (RelaxEnabled)
                             {
-                                node.priority = island.tiles.Count >= relaxLargeIslandTiles ? relaxPriorityLarge : 1f;
+                                node.priority = island.tiles.Count >= RelaxLargeIslandTiles ? RelaxPriorityLarge : 1f;
                                 node.preservedOffset = prevOffset;
                                 s_FrameLabelNodes.Add(node);
                             }
                         }
                     }
 
-                    if (relaxEnabled)
+                    if (RelaxEnabled)
                     {
                         RelaxLabelPositions(s_FrameLabelNodes, deltaTime, justStartedMoving, cameraIsMoving, cameraDistance, width, height);
                     }
@@ -1873,13 +1827,13 @@ namespace DivineDragon.MapTools
 
             foreach (var node in nodes)
             {
-                if (relaxFreezeWhileMoving && cameraIsMoving && !justStartedMoving)
+                if (RelaxFreezeWhileMoving && cameraIsMoving && !justStartedMoving)
                 {
                     node.posGui = node.anchorGui + node.preservedOffset;
                 }
                 else
                 {
-                    node.posGui = Vector2.Lerp(node.posGui, node.anchorGui, relaxAnchorK);
+                    node.posGui = Vector2.Lerp(node.posGui, node.anchorGui, RelaxAnchorK);
                 }
             }
         }
@@ -2970,6 +2924,44 @@ namespace DivineDragon.MapTools
             }
 
             return terrainId;
+        }
+
+        private static void ExtractTerrainXml()
+        {
+            if (!File.Exists(TerrainXmlBundlePath))
+            {
+                EditorUtility.DisplayDialog(
+                    "Terrain XML",
+                    $"Bundle not found at:\n{TerrainXmlBundlePath}\n\nUpdate the path in TerrainPaintToolWindow to match your Engage dump.",
+                    "OK");
+                return;
+            }
+
+            EditorUtility.DisplayProgressBar("Terrain Paint Tool", "Extracting Terrain.xml...", 0.4f);
+            try
+            {
+                bool success = Dumper.ExtractAssetAtPath(TerrainXmlBundlePath);
+                EditorUtility.ClearProgressBar();
+
+                if (!success)
+                {
+                    EditorUtility.DisplayDialog("Terrain XML", "Extraction failed. Check console for details.", "OK");
+                    return;
+                }
+
+                AssetDatabase.Refresh();
+                TerrainDefinitions.InvalidateCache();
+                EditorUtility.DisplayDialog(
+                    "Terrain XML",
+                    $"Terrain.xml extracted successfully to:\n{TerrainDefinitions.TerrainXmlAssetRelativePath}",
+                    "OK");
+            }
+            catch (Exception ex)
+            {
+                EditorUtility.ClearProgressBar();
+                Debug.LogError($"[TerrainPaintTool] Failed to extract Terrain.xml: {ex}");
+                EditorUtility.DisplayDialog("Terrain XML", $"Extraction error:\n{ex.Message}", "OK");
+            }
         }
         
         private static void DrawResizePreview(int currentWidth, int currentHeight, float startX, float startZ, TerrainHeightCache heightCache, TerrainHeightSettings heightSettings)
