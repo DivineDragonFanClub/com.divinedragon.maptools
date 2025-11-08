@@ -69,8 +69,6 @@ namespace DivineDragon.MapTools
         private const string GameDataSharePath = "Assets/Share/Addressables/Patch/Patch3/GameData";
         private const string PERSON_XML_PATH = GameDataSharePath + "/Person.xml";
         private const string JOB_XML_PATH = GameDataSharePath + "/Job.xml";
-        private const string ASSET_TABLE_XML_PATH = GameDataSharePath + "/AssetTable.xml";
-        private const string ASSET_TABLE_BUNDLE_PATH = GameDataAssetRoot + "/assettable.xml.bundle";
         private const string ICON_FOLDER = "Assets/Editor/Unit Icons and the Last Engage";
         private const string PERSON_BUNDLE_TXT = "Assets/person.bytes.bundle.txt";
         private const string JOB_BUNDLE_TXT = "Assets/job.bytes.bundle.txt";
@@ -613,61 +611,6 @@ namespace DivineDragon.MapTools
             }
         }
 
-        [MenuItem("Tools/Dispos/Dump AssetTable")]
-        public static void DumpAssetTable()
-        {
-            if (!File.Exists(ASSET_TABLE_BUNDLE_PATH))
-            {
-                EditorUtility.DisplayDialog(
-                    "AssetTable Extraction",
-                    $"AssetTable bundle not found at:\n{ASSET_TABLE_BUNDLE_PATH}",
-                    "OK");
-                return;
-            }
-
-            try
-            {
-                EditorUtility.DisplayProgressBar("AssetTable Extraction", "Extracting AssetTable.xml...", 0.5f);
-
-                bool success = DivineDragon.Dumper.ExtractAssetAtPath(ASSET_TABLE_BUNDLE_PATH);
-
-                EditorUtility.ClearProgressBar();
-                AssetDatabase.Refresh();
-
-                if (success)
-                {
-                    if (File.Exists(ASSET_TABLE_XML_PATH))
-                    {
-                        EditorUtility.DisplayDialog(
-                            "AssetTable Extraction",
-                            $"AssetTable.xml extracted successfully to:\n{ASSET_TABLE_XML_PATH}",
-                            "OK");
-                    }
-                    else
-                    {
-                        EditorUtility.DisplayDialog(
-                            "AssetTable Extraction",
-                            "Extraction completed but file not found. Check console for details.",
-                            "OK");
-                    }
-                }
-                else
-                {
-                    EditorUtility.DisplayDialog(
-                        "AssetTable Extraction",
-                        "Extraction failed. Check console for error details.",
-                        "OK");
-                }
-            }
-            catch (Exception ex)
-            {
-                EditorUtility.ClearProgressBar();
-                EditorUtility.DisplayDialog(
-                    "AssetTable Extraction Error",
-                    $"An error occurred:\n{ex.Message}",
-                    "OK");
-                Debug.LogException(ex);
-            }
-        }
+        
     }
 }
