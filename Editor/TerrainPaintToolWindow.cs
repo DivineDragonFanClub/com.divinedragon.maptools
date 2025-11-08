@@ -24,6 +24,7 @@ namespace DivineDragon.MapTools
         ShowBoth
     }
 
+
     public enum SharedEditorMode
     {
         Dispos,
@@ -213,7 +214,6 @@ namespace DivineDragon.MapTools
         // Label display is always Labels mode (no chips)
         private static float colorOpacity = 0.5f;
         private static float colorBrightness = 1.0f;
-        private static TerrainTypeDatabase terrainDatabase;
         private static TextDisplayMode textDisplayMode = TextDisplayMode.ShowTID;
         
         // Island caching for smooth transitions
@@ -433,7 +433,6 @@ namespace DivineDragon.MapTools
             InvalidateSceneColliderLists();
             LoadSettings();
             RefreshTerrainList();
-            LoadTerrainDatabase();
         }
         
         private static void OnUndoRedo()
@@ -453,25 +452,6 @@ namespace DivineDragon.MapTools
             if (instance != null)
             {
                 instance.Repaint();
-            }
-        }
-        
-        private void LoadTerrainDatabase()
-        {
-            terrainDatabase = TerrainTypeDatabase.Instance;
-            if (terrainDatabase == null || terrainDatabase.Count == 0)
-            {
-                terrainDatabase = null;
-                Debug.LogWarning($"No terrain definitions loaded. Extract terrain.xml.bundle so that '{TerrainTypeDatabase.TerrainXmlAssetRelativePath}' is available.");
-                InvalidateTerrainCaches();
-                return;
-            }
-
-            InvalidateTerrainCaches();
-
-            if (IsEmptyTerrain(selectedBrushTerrain))
-            {
-                selectedBrushTerrain = string.Empty;
             }
         }
         
@@ -512,7 +492,7 @@ namespace DivineDragon.MapTools
     // Resolve label color with auto contrast
         private static Color ResolveLabelColor(string terrainId, bool checkDisplayMode = true)
         {
-            if ((!checkDisplayMode || displayMode == DisplayMode.Both) && terrainDatabase != null)
+            if (!checkDisplayMode || displayMode == DisplayMode.Both)
             {
                 return GetContrastColor(GetBaseTerrainColor(terrainId));
             }
@@ -521,14 +501,14 @@ namespace DivineDragon.MapTools
 
         private static Color GetBaseTerrainColor(string terrainId)
         {
-            if (terrainDatabase == null || string.IsNullOrEmpty(terrainId))
+            if (string.IsNullOrEmpty(terrainId))
             {
                 return Color.gray;
             }
 
             if (!terrainColorCache.TryGetValue(terrainId, out Color baseColor))
             {
-                baseColor = terrainDatabase.GetTerrainColor(terrainId, Color.gray);
+                baseColor = TerrainDefinitions.GetColorOrFallback(terrainId);
                 terrainColorCache[terrainId] = baseColor;
             }
 
@@ -1162,27 +1142,21 @@ namespace DivineDragon.MapTools
                     EditorGUILayout.LabelField("Tile Color Settings", EditorStyles.miniBoldLabel);
                     colorOpacity = EditorGUILayout.Slider("Tile Opacity", colorOpacity, 0.1f, 1f);
                     colorBrightness = EditorGUILayout.Slider("Tile Brightness", colorBrightness, 0.1f, 2f);
-                    if (terrainDatabase == null)
+                    if (!TerrainDefinitions.HasDefinitions)
                     {
-                        EditorGUILayout.HelpBox("Terrain colors not loaded. Click 'Parse Terrain XML' to load colors.", MessageType.Warning);
-                        if (GUILayout.Button("Parse Terrain XML"))
-                        {
-                            TerrainXMLParser.ParseTerrainXML();
-                            LoadTerrainDatabase();
-                        }
+                        EditorGUILayout.HelpBox(
+                            $"Terrain definitions not found at '{TerrainDefinitions.TerrainXmlAssetRelativePath}'. Extract terrain.xml.bundle via the Chapter Dumper to enable named labels and colors.",
+                            MessageType.Info);
                     }
                 }
                 showGridLines = EditorGUILayout.Toggle("Show Grid Lines", showGridLines);
                 gridColor = EditorGUILayout.ColorField("Grid Color", gridColor);
                 gridThickness = EditorGUILayout.Slider("Grid Thickness", gridThickness, 0.5f, 50f);
 
-                if (displayMode != DisplayMode.ColorOnly)
-                {
-                    EditorGUILayout.Space(5);
-                    EditorGUILayout.LabelField("Text", EditorStyles.miniBoldLabel);
-                    textDisplayMode = (TextDisplayMode)EditorGUILayout.EnumPopup("Text Display", textDisplayMode);
-                    textSize = EditorGUILayout.Slider("Text Size", textSize, 0.1f, 3f);
-                }
+                EditorGUILayout.Space(5);
+                EditorGUILayout.LabelField("Hover Labels", EditorStyles.miniBoldLabel);
+                textDisplayMode = (TextDisplayMode)EditorGUILayout.EnumPopup("Display", textDisplayMode);
+                textSize = EditorGUILayout.Slider("Text Size", textSize, 0.1f, 3f);
 
                 if (EditorGUI.EndChangeCheck())
                 {
@@ -1224,7 +1198,7 @@ namespace DivineDragon.MapTools
                         if (paintMode)
                         {
                             // Make sure we have a default terrain selected
-                            if (IsEmptyTerrain(selectedBrushTerrain) && terrainDatabase != null)
+                            if (IsEmptyTerrain(selectedBrushTerrain))
                             {
                                 var paintableTerrains = GetPaintableTerrains();
                                 if (paintableTerrains.Count > 0)
@@ -1259,21 +1233,15 @@ namespace DivineDragon.MapTools
                     }
                         if (!IsEmptyTerrain(hoveredIdForPanel))
                         {
-                            if (terrainDatabase != null)
+                            Color hColor = GetBaseTerrainColor(hoveredIdForPanel);
+                            Rect colorRectH = GUILayoutUtility.GetRect(20, 20, GUILayout.Width(20));
+                            EditorGUI.DrawRect(colorRectH, hColor);
+                            EditorGUI.DrawRect(colorRectH, new Color(0, 0, 0, 0.2f));
+
+                            string displayNameH = GetTerrainDisplayText(hoveredIdForPanel);
+                            if (string.IsNullOrEmpty(displayNameH))
                             {
-                                Color hColor = GetBaseTerrainColor(hoveredIdForPanel);
-                                Rect colorRectH = GUILayoutUtility.GetRect(20, 20, GUILayout.Width(20));
-                                EditorGUI.DrawRect(colorRectH, hColor);
-                                EditorGUI.DrawRect(colorRectH, new Color(0, 0, 0, 0.2f));
-                            }
-                            string displayNameH = hoveredIdForPanel;
-                            if (terrainDatabase != null)
-                            {
-                                var tH = terrainDatabase.GetTerrainType(hoveredIdForPanel);
-                                if (tH != null && !string.IsNullOrEmpty(tH.name) && tH.name != tH.tid)
-                                {
-                                    displayNameH = $"{hoveredIdForPanel} ({tH.name})";
-                                }
+                                displayNameH = hoveredIdForPanel;
                             }
                             EditorGUILayout.LabelField(displayNameH, EditorStyles.boldLabel);
                         }
@@ -1295,30 +1263,20 @@ namespace DivineDragon.MapTools
                     
                     if (!IsEmptyTerrain(selectedBrushTerrain))
                     {
-                        // Draw color chip
-                        if (terrainDatabase != null)
-                        {
-                            Color terrainColor = GetBaseTerrainColor(selectedBrushTerrain);
-                            Rect colorRect = GUILayoutUtility.GetRect(20, 20, GUILayout.Width(20));
-                            EditorGUI.DrawRect(colorRect, terrainColor);
-                            EditorGUI.DrawRect(colorRect, new Color(0, 0, 0, 0.2f)); // Border
-                        }
+                        Color terrainColor = GetBaseTerrainColor(selectedBrushTerrain);
+                        Rect colorRect = GUILayoutUtility.GetRect(20, 20, GUILayout.Width(20));
+                        EditorGUI.DrawRect(colorRect, terrainColor);
+                        EditorGUI.DrawRect(colorRect, new Color(0, 0, 0, 0.2f)); // Border
                         
-                        // Show terrain ID and name
-                        string displayName = selectedBrushTerrain;
-                        if (terrainDatabase != null)
+                        string displayName = GetTerrainDisplayText(selectedBrushTerrain);
+                        if (string.IsNullOrEmpty(displayName))
                         {
-                            var terrain = terrainDatabase.GetTerrainType(selectedBrushTerrain);
-                            if (terrain != null && !string.IsNullOrEmpty(terrain.name) && terrain.name != terrain.tid)
-                            {
-                                displayName = $"{selectedBrushTerrain} ({terrain.name})";
-                            }
+                            displayName = selectedBrushTerrain;
                         }
                         EditorGUILayout.LabelField(displayName, EditorStyles.boldLabel);
                     }
                     else
                     {
-                        // Draw blank color chip to maintain consistent layout
                         Rect blankRect = GUILayoutUtility.GetRect(20, 20, GUILayout.Width(20));
                         EditorGUI.DrawRect(blankRect, new Color(0.3f, 0.3f, 0.3f, 0.2f));
                         EditorGUI.DrawRect(blankRect, new Color(0, 0, 0, 0.2f));
@@ -1326,69 +1284,98 @@ namespace DivineDragon.MapTools
                     }
                     EditorGUILayout.EndHorizontal();
                     
-                    if (terrainDatabase != null)
-                    {
-                        EditorGUILayout.Space(5);
-                        EditorGUILayout.LabelField("Terrain Palette", EditorStyles.miniBoldLabel);
-                        
-                        // Get terrains used in current map
-                        HashSet<string> usedTerrains = new HashSet<string>();
-                        if (selectedTerrain != null && selectedTerrain.m_Terrains != null)
-                        {
-                            foreach (string tid in selectedTerrain.m_Terrains)
-                            {
-                                if (!IsEmptyTerrain(tid))
-                                {
-                                    usedTerrains.Add(tid);
-                                }
-                            }
-                        }
-                        
-                        var allTypes = GetPaintableTerrains();
+                    EditorGUILayout.Space(5);
+                    EditorGUILayout.LabelField("Terrain Palette", EditorStyles.miniBoldLabel);
 
-                        // Used Terrains Section
-                        if (usedTerrains.Count > 0)
+                    HashSet<string> usedTerrains = new HashSet<string>();
+                    if (selectedTerrain != null && selectedTerrain.m_Terrains != null)
+                    {
+                        foreach (string tid in selectedTerrain.m_Terrains)
                         {
-                            EditorGUILayout.LabelField($"★ Used in Map ({usedTerrains.Count})", EditorStyles.miniBoldLabel);
-                            
-                            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-                            
-                            var usedTerrainsList = allTypes.Where(t => usedTerrains.Contains(t.tid)).ToList();
-                            usedTerrainsList.Sort((a, b) => string.Compare(a.tid, b.tid));
-                            
-                            foreach (var terrain in usedTerrainsList)
+                            if (!IsEmptyTerrain(tid))
                             {
-                                DrawTerrainButton(terrain, true);
+                                usedTerrains.Add(tid);
                             }
-                            
-                            EditorGUILayout.EndVertical();
-                            EditorGUILayout.Space(5);
                         }
-                        
-                        // All Terrains Section
-                        EditorGUILayout.LabelField("All Terrains", EditorStyles.miniBoldLabel);
-                        terrainSearchFilter = EditorGUILayout.TextField("Search", terrainSearchFilter);
-                        
-                        paletteScrollPosition = EditorGUILayout.BeginScrollView(paletteScrollPosition, GUILayout.Height(150));
-                        
-                        EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-                        
+                    }
+
+                    var allTypes = GetPaintableTerrains();
+                    var usedList = new List<TerrainType>();
+                    if (usedTerrains.Count > 0)
+                    {
                         foreach (var terrain in allTypes)
                         {
-                            if (!string.IsNullOrEmpty(terrainSearchFilter) && 
-                                !terrain.tid.ToLower().Contains(terrainSearchFilter.ToLower()) &&
-                                !terrain.name.ToLower().Contains(terrainSearchFilter.ToLower()))
+                            if (terrain != null && usedTerrains.Contains(terrain.tid))
+                            {
+                                usedList.Add(terrain);
+                            }
+                        }
+                        usedList.Sort((a, b) => string.Compare(a.tid, b.tid, StringComparison.OrdinalIgnoreCase));
+                    }
+
+                    if (usedList.Count > 0)
+                    {
+                        EditorGUILayout.LabelField($"Used in Map ({usedList.Count})", EditorStyles.miniBoldLabel);
+                        EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+                        foreach (var terrain in usedList)
+                        {
+                            DrawTerrainButton(terrain, true, false);
+                        }
+                        EditorGUILayout.EndVertical();
+                        EditorGUILayout.Space(5);
+                    }
+
+                    EditorGUILayout.LabelField("All Terrains", EditorStyles.miniBoldLabel);
+                    EditorGUILayout.BeginHorizontal();
+                    EditorGUILayout.LabelField("Filter", GUILayout.Width(40));
+                    string newFilter = EditorGUILayout.TextField(terrainSearchFilter ?? string.Empty);
+                    if (!string.Equals(newFilter, terrainSearchFilter, StringComparison.Ordinal))
+                    {
+                        terrainSearchFilter = newFilter;
+                    }
+                    EditorGUILayout.EndHorizontal();
+
+                    string filterLower = string.IsNullOrEmpty(terrainSearchFilter)
+                        ? null
+                        : terrainSearchFilter.ToLowerInvariant();
+
+                    paletteScrollPosition = EditorGUILayout.BeginScrollView(paletteScrollPosition, GUILayout.Height(200));
+                    EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+
+                    if (allTypes.Count == 0)
+                    {
+                        string message = TerrainDefinitions.HasDefinitions
+                            ? "No paintable terrains detected in the current selection."
+                            : $"Terrain palette is empty. Extract {TerrainDefinitions.TerrainXmlAssetRelativePath} or sample an existing tile to build a palette.";
+                        EditorGUILayout.HelpBox(message, MessageType.Info);
+                    }
+                    else
+                    {
+                        foreach (var terrain in allTypes)
+                        {
+                            if (terrain == null || string.IsNullOrEmpty(terrain.tid))
                             {
                                 continue;
                             }
 
-                            DrawTerrainButton(terrain, usedTerrains.Contains(terrain.tid));
+                            if (filterLower != null)
+                            {
+                                bool matchesTid = terrain.tid.ToLowerInvariant().Contains(filterLower);
+                                bool matchesName = !string.IsNullOrEmpty(terrain.name) && terrain.name.ToLowerInvariant().Contains(filterLower);
+                                if (!matchesTid && !matchesName)
+                                {
+                                    continue;
+                                }
+                            }
+
+                            bool isUsed = usedTerrains.Contains(terrain.tid);
+                            DrawTerrainButton(terrain, isUsed, true);
                         }
-                        
-                        EditorGUILayout.EndVertical();
-                        EditorGUILayout.EndScrollView();
                     }
-                    
+
+                    EditorGUILayout.EndVertical();
+                    EditorGUILayout.EndScrollView();
+
                     EditorGUILayout.HelpBox("Left Click: Paint | Ctrl/Cmd+Click: Sample/Pick", MessageType.Info);
                     }
                     
@@ -1555,7 +1542,7 @@ namespace DivineDragon.MapTools
             justStartedMoving = (!wasCameraMoving && cameraIsMoving);
             wasCameraMoving = cameraIsMoving;
 
-            if (isRepaint && terrainDatabase != null)
+            if (isRepaint)
             {
                 Mesh overlayMesh = GetOverlayMesh(selectedTerrain, currentGrid, heightCache, heightSettings);
                 if (overlayMesh != null)
@@ -1577,7 +1564,7 @@ namespace DivineDragon.MapTools
                 }
             }
             
-            if (isRepaint && terrainDatabase != null)
+            if (isRepaint)
             {
                 List<TerrainIsland> islands = GetOrCreateIslands(selectedTerrain, cameraDistance);
                 foreach (var island in islands)
@@ -2199,9 +2186,9 @@ namespace DivineDragon.MapTools
 
                 // Get the actual terrain color at the hovered tile
                 // This should match EXACTLY how the tiles are displayed on the map (with brightness adjustment)
-                Color sampleColor = Color.gray;
-                Color sampleOutline = Color.gray;
-                if (selectedTerrain != null && terrainDatabase != null)
+                Color sampleColor = new Color(0.3f, 0.3f, 0.3f, 0.4f);
+                Color sampleOutline = new Color(0.2f, 0.2f, 0.2f, 0.8f);
+                if (selectedTerrain != null)
                 {
                     TerrainVirtualGrid grid = GetVirtualGrid(selectedTerrain);
                     if (grid != null)
@@ -2212,23 +2199,9 @@ namespace DivineDragon.MapTools
                             string terrainToSample = selectedTerrain.m_Terrains[actualIndex];
                             if (!IsEmptyTerrain(terrainToSample))
                             {
-                                // Get base color from database
-                                Color terrainColor = GetBaseTerrainColor(terrainToSample);
-
-                                // Apply brightness adjustment (same as actual tile rendering)
-                                terrainColor.r = Mathf.Clamp01(terrainColor.r * colorBrightness);
-                                terrainColor.g = Mathf.Clamp01(terrainColor.g * colorBrightness);
-                                terrainColor.b = Mathf.Clamp01(terrainColor.b * colorBrightness);
-
-                                // Now create preview colors
-                                sampleColor = new Color(terrainColor.r, terrainColor.g, terrainColor.b, 0.4f);
-                                // Darken the adjusted color for the outline
-                                sampleOutline = new Color(
-                                    terrainColor.r * 0.6f,
-                                    terrainColor.g * 0.6f,
-                                    terrainColor.b * 0.6f,
-                                    0.8f
-                                );
+                                Color fillColor = GetTileFillColor(terrainToSample);
+                                sampleColor = new Color(fillColor.r, fillColor.g, fillColor.b, Mathf.Clamp01(fillColor.a + 0.1f));
+                                sampleOutline = GetBorderColor(terrainToSample);
                             }
                         }
                     }
@@ -2269,7 +2242,7 @@ namespace DivineDragon.MapTools
             else
             {
                 // Paint preview with actual terrain color
-                if (IsEmptyTerrain(selectedBrushTerrain) || terrainDatabase == null)
+                if (IsEmptyTerrain(selectedBrushTerrain))
                 {
                     // Fallback to yellow if no terrain selected
                     Color previewColor = new Color(1f, 1f, 0f, 0.3f);
@@ -2548,15 +2521,9 @@ namespace DivineDragon.MapTools
             }
             
             // Calculate colors based on terrain brightness for contrast
-            Color baseColor = Color.gray;
-            bool isDarkTerrain = false;
-            if (!string.IsNullOrEmpty(terrainId) && terrainDatabase != null)
-            {
-                baseColor = GetBaseTerrainColor(terrainId);
-                // Calculate perceived brightness
-                float brightness = baseColor.r * 0.299f + baseColor.g * 0.587f + baseColor.b * 0.114f;
-                isDarkTerrain = brightness < 0.4f;
-            }
+            Color baseColor = GetBaseTerrainColor(terrainId);
+            float brightnessCheck = baseColor.r * 0.299f + baseColor.g * 0.587f + baseColor.b * 0.114f;
+            bool isDarkTerrain = brightnessCheck < 0.4f;
             
             // Draw multi-pass border with soft blur effect
             // Contrasting base color (black for light terrains, white for dark terrains)
@@ -2565,22 +2532,13 @@ namespace DivineDragon.MapTools
                 new Color(0f, 0f, 0f, 1f);    // Black for light terrains
             
             // Calculate the main border color
-            Color borderColor;
-            if (!string.IsNullOrEmpty(terrainId) && terrainDatabase != null)
-            {
-                // Use a brightened version of the terrain color
-                float boost = isDarkTerrain ? 1.5f : 1.2f;
-                borderColor = new Color(
-                    Mathf.Min(1f, baseColor.r * boost), 
-                    Mathf.Min(1f, baseColor.g * boost), 
-                    Mathf.Min(1f, baseColor.b * boost), 
-                    1f
-                );
-            }
-            else
-            {
-                borderColor = new Color(1f, 1f, 1f, 1f);
-            }
+            float boost = isDarkTerrain ? 1.5f : 1.2f;
+            Color borderColor = new Color(
+                Mathf.Min(1f, baseColor.r * boost),
+                Mathf.Min(1f, baseColor.g * boost),
+                Mathf.Min(1f, baseColor.b * boost),
+                1f
+            );
             
             // Draw multiple passes to create soft blur effect
             // Outer glow (widest, most transparent)
@@ -2686,40 +2644,34 @@ namespace DivineDragon.MapTools
                 GUI.Label(outlineTextRect, s_LabelContent, outlineStyle);
                 
                 // Draw outline for icon too
-                if (terrainDatabase != null)
-                {
-                    Rect outlineIconRect = new Rect(
-                        labelRect.x + iconPadding + offset.x, 
-                        labelRect.y + (labelRect.height - iconSize) / 2 + offset.y, 
-                        iconSize, 
-                        iconSize
-                    );
-                    EditorGUI.DrawRect(outlineIconRect, new Color(outlineColor.r, outlineColor.g, outlineColor.b, 0.3f));
-                }
+                Rect outlineIconRect = new Rect(
+                    labelRect.x + iconPadding + offset.x, 
+                    labelRect.y + (labelRect.height - iconSize) / 2 + offset.y, 
+                    iconSize, 
+                    iconSize
+                );
+                EditorGUI.DrawRect(outlineIconRect, new Color(outlineColor.r, outlineColor.g, outlineColor.b, 0.3f));
             }
             
             // Draw colored icon
-            if (terrainDatabase != null)
-            {
-                Color terrainColor = GetBaseTerrainColor(terrainId);
-                Rect iconRect = new Rect(labelRect.x + iconPadding, 
-                    labelRect.y + (labelRect.height - iconSize) / 2, iconSize, iconSize);
-                
-                // Draw icon background
-                Color iconFill = terrainColor; iconFill.a *= (alphaMul * extraAlpha);
-                EditorGUI.DrawRect(iconRect, iconFill);
-                
-                // Draw icon border for clarity
-                Color borderColor = (textColor == Color.black) ? Color.black : Color.white;
-                borderColor.a *= (alphaMul * extraAlpha);
-                Handles.DrawBezier(
-                    new Vector3(iconRect.x, iconRect.y, 0),
-                    new Vector3(iconRect.x + iconSize, iconRect.y, 0),
-                    new Vector3(iconRect.x, iconRect.y, 0),
-                    new Vector3(iconRect.x + iconSize, iconRect.y, 0),
-                    borderColor, null, 1f
-                );
-            }
+            Color terrainColor = GetBaseTerrainColor(terrainId);
+            Rect iconRect = new Rect(labelRect.x + iconPadding, 
+                labelRect.y + (labelRect.height - iconSize) / 2, iconSize, iconSize);
+            
+            // Draw icon background
+            Color iconFill = terrainColor; iconFill.a *= (alphaMul * extraAlpha);
+            EditorGUI.DrawRect(iconRect, iconFill);
+            
+            // Draw icon border for clarity
+            Color borderColorOutline = (textColor == Color.black) ? Color.black : Color.white;
+            borderColorOutline.a *= (alphaMul * extraAlpha);
+            Handles.DrawBezier(
+                new Vector3(iconRect.x, iconRect.y, 0),
+                new Vector3(iconRect.x + iconSize, iconRect.y, 0),
+                new Vector3(iconRect.x, iconRect.y, 0),
+                new Vector3(iconRect.x + iconSize, iconRect.y, 0),
+                borderColorOutline, null, 1f
+            );
             
             // Draw the text on top
             textStyle.normal.textColor = new Color(textColor.r, textColor.g, textColor.b, textColor.a * alphaMul * extraAlpha);
@@ -2782,33 +2734,27 @@ namespace DivineDragon.MapTools
                                                 labelRect.height);
                 GUI.Label(outlineTextRect, s_LabelContent, outlineStyle);
 
-                if (terrainDatabase != null)
-                {
-                    Rect outlineIconRect = new Rect(labelRect.x + iconPadding + offset.x,
-                        labelRect.y + (labelRect.height - iconSize) / 2 + offset.y,
-                        iconSize, iconSize);
-                    EditorGUI.DrawRect(outlineIconRect, new Color(outlineColor.r, outlineColor.g, outlineColor.b, 0.3f));
-                }
+                Rect outlineIconRect = new Rect(labelRect.x + iconPadding + offset.x,
+                    labelRect.y + (labelRect.height - iconSize) / 2 + offset.y,
+                    iconSize, iconSize);
+                EditorGUI.DrawRect(outlineIconRect, new Color(outlineColor.r, outlineColor.g, outlineColor.b, 0.3f));
             }
 
             // Icon
-            if (terrainDatabase != null)
-            {
-                Color terrainColor = GetBaseTerrainColor(terrainId);
-                Rect iconRect = new Rect(labelRect.x + iconPadding,
-                                         labelRect.y + (labelRect.height - iconSize) / 2,
-                                         iconSize, iconSize);
+            Color terrainColor = GetBaseTerrainColor(terrainId);
+            Rect iconRect = new Rect(labelRect.x + iconPadding,
+                                     labelRect.y + (labelRect.height - iconSize) / 2,
+                                     iconSize, iconSize);
 
-                Color fill = terrainColor; fill.a *= (alphaMul * extraAlpha);
-                EditorGUI.DrawRect(iconRect, fill);
-                Color borderColor = (textColor == Color.black) ? Color.black : Color.white;
-                borderColor.a *= (alphaMul * extraAlpha);
-                Handles.DrawBezier(new Vector3(iconRect.x, iconRect.y, 0),
-                                   new Vector3(iconRect.x + iconSize, iconRect.y, 0),
-                                   new Vector3(iconRect.x, iconRect.y, 0),
-                                   new Vector3(iconRect.x + iconSize, iconRect.y, 0),
-                                   borderColor, null, 1f);
-            }
+            Color fill = terrainColor; fill.a *= (alphaMul * extraAlpha);
+            EditorGUI.DrawRect(iconRect, fill);
+            Color borderColor = (textColor == Color.black) ? Color.black : Color.white;
+            borderColor.a *= (alphaMul * extraAlpha);
+            Handles.DrawBezier(new Vector3(iconRect.x, iconRect.y, 0),
+                               new Vector3(iconRect.x + iconSize, iconRect.y, 0),
+                               new Vector3(iconRect.x, iconRect.y, 0),
+                               new Vector3(iconRect.x + iconSize, iconRect.y, 0),
+                               borderColor, null, 1f);
 
             // Text
             textStyle.normal.textColor = new Color(textColor.r, textColor.g, textColor.b, textColor.a * alphaMul * extraAlpha);
@@ -2980,19 +2926,8 @@ namespace DivineDragon.MapTools
                 return string.Empty;
             }
 
-            string tid = terrainId.Replace("TID_", "");
-            string name = null;
-            
-            if (terrainDatabase != null)
-            {
-                var terrain = terrainDatabase.GetTerrainType(terrainId);
-                if (terrain != null && !string.IsNullOrEmpty(terrain.name))
-                {
-                    name = terrain.name;
-                    if (name.StartsWith("MTID_"))
-                        name = name.Substring(5);
-                }
-            }
+            string tid = GetTidLabel(terrainId);
+            string localizedName = ResolveTerrainNameForCurrentLanguage(terrainId);
             
             switch (textDisplayMode)
             {
@@ -3000,18 +2935,41 @@ namespace DivineDragon.MapTools
                     return tid;
                     
                 case TextDisplayMode.ShowName:
-                    return name ?? tid; // Fallback to TID if no name
+                    return string.IsNullOrEmpty(localizedName) ? tid : localizedName;
                     
                 case TextDisplayMode.ShowBoth:
-                    if (name != null && name != terrainId)
+                    if (string.IsNullOrEmpty(localizedName) || string.Equals(localizedName, tid, StringComparison.Ordinal))
                     {
-                        return tid + "\n" + name;
+                        return tid;
                     }
-                    return tid;
+                    return tid + "\n" + localizedName;
                     
                 default:
                     return tid;
             }
+        }
+
+        private static string ResolveTerrainNameForCurrentLanguage(string terrainId)
+        {
+            string databaseName = TerrainDefinitions.GetTerrainName(terrainId);
+            if (!string.IsNullOrEmpty(databaseName))
+            {
+                return databaseName.StartsWith("MTID_", StringComparison.OrdinalIgnoreCase)
+                    ? databaseName.Substring(5)
+                    : databaseName;
+            }
+
+            return GetTidLabel(terrainId);
+        }
+
+        private static string GetTidLabel(string terrainId)
+        {
+            if (string.IsNullOrEmpty(terrainId))
+            {
+                return string.Empty;
+            }
+
+            return terrainId;
         }
         
         private static void DrawResizePreview(int currentWidth, int currentHeight, float startX, float startZ, TerrainHeightCache heightCache, TerrainHeightSettings heightSettings)
@@ -3216,30 +3174,45 @@ namespace DivineDragon.MapTools
             );
         }
         
-        private static void DrawTerrainButton(TerrainType terrain, bool isUsed)
+        private static void DrawTerrainButton(TerrainType terrain, bool isUsed, bool showUsageIndicator = true)
         {
-            EditorGUILayout.BeginHorizontal();
+            Rect rowRect = EditorGUILayout.BeginHorizontal();
+            if (isUsed)
+            {
+                Color highlight = new Color(1f, 0.95f, 0.65f, 0.35f);
+                EditorGUI.DrawRect(rowRect, highlight);
+            }
             
             // Draw color swatch
             Rect colorRect = GUILayoutUtility.GetRect(20, 20, GUILayout.Width(20));
             EditorGUI.DrawRect(colorRect, terrain.color);
             EditorGUI.DrawRect(colorRect, new Color(0, 0, 0, 0.2f)); // Border
             
-            // Star indicator for used terrains
-            if (isUsed)
+            if (showUsageIndicator)
             {
-                GUIStyle starStyle = new GUIStyle(EditorStyles.label);
-                starStyle.normal.textColor = Color.yellow;
-                starStyle.fontStyle = FontStyle.Bold;
-                GUILayout.Label("★", starStyle, GUILayout.Width(20));
-            }
-            else
-            {
-                GUILayout.Label("", GUILayout.Width(20));
+                if (isUsed)
+                {
+                    GUIStyle starStyle = new GUIStyle(EditorStyles.label);
+                    starStyle.normal.textColor = Color.yellow;
+                    starStyle.fontStyle = FontStyle.Bold;
+                    GUILayout.Label("★", starStyle, GUILayout.Width(20));
+                }
+                else
+                {
+                    GUILayout.Label("", GUILayout.Width(20));
+                }
             }
             
             // Terrain button
-            GUI.backgroundColor = terrain.tid == selectedBrushTerrain ? Color.cyan : Color.white;
+            Color previousBg = GUI.backgroundColor;
+            if (terrain.tid == selectedBrushTerrain)
+            {
+                GUI.backgroundColor = Color.cyan;
+            }
+            else
+            {
+                GUI.backgroundColor = Color.white;
+            }
             
             string displayName = terrain.tid.Replace("TID_", "");
             if (!string.IsNullOrEmpty(terrain.name) && terrain.name != terrain.tid)
@@ -3253,36 +3226,57 @@ namespace DivineDragon.MapTools
                 SceneView.RepaintAll();
             }
             
-            GUI.backgroundColor = Color.white;
+            GUI.backgroundColor = previousBg;
             
             EditorGUILayout.EndHorizontal();
         }
 
         private static List<TerrainType> GetPaintableTerrains()
         {
-            if (terrainDatabase == null)
-            {
-                paintableTerrainsCache.Clear();
-                paintableTerrainsDirty = true;
-                return paintableTerrainsCache;
-            }
-
             if (paintableTerrainsDirty)
             {
                 paintableTerrainsCache.Clear();
-                var allTypes = terrainDatabase.GetAllTerrainTypes();
-                for (int i = 0; i < allTypes.Count; i++)
+                var definitions = TerrainDefinitions.GetAllTerrains();
+                if (definitions.Count > 0)
                 {
-                    var terrain = allTypes[i];
-                    if (!IsEmptyTerrain(terrain.tid))
+                    for (int i = 0; i < definitions.Count; i++)
                     {
-                        paintableTerrainsCache.Add(terrain);
+                        var terrain = definitions[i];
+                        if (terrain != null && !IsEmptyTerrain(terrain.tid))
+                        {
+                            paintableTerrainsCache.Add(terrain);
+                        }
                     }
                 }
+                else if (selectedTerrain?.m_Terrains != null)
+                {
+                    HashSet<string> uniqueTids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (string tid in selectedTerrain.m_Terrains)
+                    {
+                        if (IsEmptyTerrain(tid) || !uniqueTids.Add(tid))
+                        {
+                            continue;
+                        }
+
+                        paintableTerrainsCache.Add(CreateFallbackTerrain(tid));
+                    }
+                }
+
                 paintableTerrainsDirty = false;
             }
 
             return paintableTerrainsCache;
+        }
+
+        private static TerrainType CreateFallbackTerrain(string tid)
+        {
+            Color color = TerrainDefinitions.GetColorOrFallback(tid);
+            return new TerrainType(
+                tid,
+                tid,
+                Mathf.Clamp(Mathf.RoundToInt(color.r * 255f), 0, 255),
+                Mathf.Clamp(Mathf.RoundToInt(color.g * 255f), 0, 255),
+                Mathf.Clamp(Mathf.RoundToInt(color.b * 255f), 0, 255));
         }
 
         // Reusable GUI styles

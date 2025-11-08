@@ -107,14 +107,26 @@ namespace DivineDragon.MapTools
             hoverEntry = entry;
         }
         
-        public void Initialize() { }
-        
-        public void Cleanup() { }
+        public void Initialize()
+        {
+        }
+
+        public void Cleanup()
+        {
+            tileTopEntries.Clear();
+            tempTileCounts.Clear();
+            tempStackTiles.Clear();
+            tempEntriesToDrawLater.Clear();
+            selectedEntry = null;
+            hoverEntry = null;
+            currentDocument = null;
+            currentTerrain = null;
+        }
         
         public void RenderDocument(DisposDocument document, TerrainAssetAdapter terrain = null)
         {
             if (document == null) return;
-            
+
             currentDocument = document;
             currentTerrain = terrain?.IsValid == true ? terrain : null;
             Vector3 offset = TerrainPaintToolWindow.GetWorldOffset();
@@ -263,14 +275,14 @@ namespace DivineDragon.MapTools
                     }
 
                     if (entry == selectedEntry) continue; // Selected always drawn last
-                    
+
                     // Check if this entry should be on top of its tile
                     if (IsEntryTopForTile(entry))
                     {
                         tempEntriesToDrawLater.Add(entry);
                         continue;
                     }
-                    
+
                     DrawUnitPlate(entry);
                     DrawUnitGUI(entry);
                 }
@@ -1131,6 +1143,7 @@ namespace DivineDragon.MapTools
         {
             worldOffset = offset;
             RefreshUnits();
+
             SceneView.RepaintAll();
         }
 
@@ -1138,5 +1151,6 @@ namespace DivineDragon.MapTools
         {
             return worldOffset.y;
         }
+
     }
 }

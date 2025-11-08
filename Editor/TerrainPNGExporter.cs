@@ -9,7 +9,6 @@ namespace DivineDragon.MapTools
     {
         public static void ExportToPNG(
             TerrainAssetAdapter terrain,
-            TerrainTypeDatabase database,
             int pixelsPerTile,
             bool includeGrid,
             Color gridColor,
@@ -55,7 +54,7 @@ namespace DivineDragon.MapTools
             texture.SetPixels(pixels);
             
             // Draw terrain tiles
-            DrawTerrainTiles(texture, grid, database, pixelsPerTile, includeGrid, gridThickness, colorBrightness);
+            DrawTerrainTiles(texture, grid, pixelsPerTile, includeGrid, gridThickness, colorBrightness);
             
             // Draw grid lines if requested
             if (includeGrid)
@@ -94,7 +93,6 @@ namespace DivineDragon.MapTools
         private static void DrawTerrainTiles(
             Texture2D texture,
             TerrainVirtualGrid grid,
-            TerrainTypeDatabase database,
             int pixelsPerTile,
             bool includeGrid,
             int gridThickness,
@@ -112,7 +110,7 @@ namespace DivineDragon.MapTools
                         continue;
                     
                     // Get color for this terrain type
-                    Color tileColor = GetTerrainColor(terrainId, database, colorBrightness);
+                    Color tileColor = GetTerrainColor(terrainId, colorBrightness);
                     
                     // Calculate pixel position (don't flip Y - keep it as in Unity)
                     int pixelX, pixelY;
@@ -183,17 +181,14 @@ namespace DivineDragon.MapTools
             }
         }
         
-        private static Color GetTerrainColor(string terrainId, TerrainTypeDatabase database, float brightness)
+        private static Color GetTerrainColor(string terrainId, float brightness)
         {
-            if (database == null)
-                return Color.gray;
-            
             // Special case for MTID_Nothing
             if (terrainId == "MTID_Nothing")
                 return new Color(0.2f, 0.2f, 0.2f, 1f); // Dark gray for empty tiles
             
-            // Get color from database
-            Color color = database.GetTerrainColor(terrainId, Color.gray);
+            // Get color from definitions, falling back to deterministic hash
+            Color color = TerrainDefinitions.GetColorOrFallback(terrainId);
             
             // Apply brightness adjustment
             color.r = Mathf.Clamp01(color.r * brightness);

@@ -390,7 +390,7 @@ namespace DivineDragon.MapTools
 
         private static Mesh GetOverlayMesh(TerrainAssetAdapter terrain, TerrainVirtualGrid grid, TerrainHeightCache cache, TerrainHeightSettings settings)
         {
-            if (terrain == null || grid == null || terrainDatabase == null)
+            if (terrain == null || grid == null)
             {
                 return null;
             }

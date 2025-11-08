@@ -54,7 +54,7 @@ namespace DivineDragon.MapTools
                 return new TerrainHeightSettings
                 {
                     offset = 0f,
-                    mode = TerrainHeightMode.FixedOffset
+                    mode = TerrainHeightMode.RaycastMesh
                 };
             }
 
@@ -71,7 +71,7 @@ namespace DivineDragon.MapTools
                 return new TerrainHeightSettings
                 {
                     offset = 0f,
-                    mode = TerrainHeightMode.FixedOffset
+                    mode = TerrainHeightMode.RaycastMesh
                 };
             }
 
@@ -80,7 +80,7 @@ namespace DivineDragon.MapTools
                 settings = new TerrainHeightSettings
                 {
                     offset = 0f,
-                    mode = TerrainHeightMode.FixedOffset
+                    mode = TerrainHeightMode.RaycastMesh
                 };
                 terrainHeightSettings[assetPath] = settings;
             }
@@ -125,7 +125,7 @@ namespace DivineDragon.MapTools
                             }
 
                             float offset = (prefs.heights != null && i < prefs.heights.Count) ? prefs.heights[i] : 0f;
-                            TerrainHeightMode mode = TerrainHeightMode.FixedOffset;
+                            TerrainHeightMode mode = TerrainHeightMode.RaycastMesh;
                             if (prefs.modes != null && i < prefs.modes.Count)
                             {
                                 mode = (TerrainHeightMode)Mathf.Clamp(prefs.modes[i], 0, (int)TerrainHeightMode.RaycastMesh);

@@ -28,7 +28,7 @@ namespace DivineDragon.MapTools
             new SupportAsset(GameDataShareAssetPath + "/Job.xml", GameDataAssetRoot + "/job.xml.bundle"),
             new SupportAsset(GameDataShareAssetPath + "/Item.xml", GameDataAssetRoot + "/item.xml.bundle"),
             new SupportAsset(GameDataShareAssetPath + "/Skill.xml", GameDataAssetRoot + "/skill.xml.bundle"),
-            new SupportAsset(TerrainTypeDatabase.TerrainXmlAssetRelativePath, TerrainXmlBundlePath)
+            new SupportAsset(TerrainDefinitions.TerrainXmlAssetRelativePath, TerrainXmlBundlePath)
         };
 
         private readonly List<ChapterRecord> chapters = new List<ChapterRecord>();

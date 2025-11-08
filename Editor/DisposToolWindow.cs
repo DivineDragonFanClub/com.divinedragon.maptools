@@ -397,6 +397,7 @@ namespace DivineDragon.MapTools
 
             // Vertical view toggles so they don't force a wide window
             bool prevGrid = showGrid, prevLabels = showLabels, prevDirs = showDirections, prevIcons = showIcons, prevSimple = showSimplifiedNames;
+
             showGrid = EditorGUILayout.ToggleLeft("Grid", showGrid);
             showLabels = EditorGUILayout.ToggleLeft("Labels", showLabels);
             if (showLabels)
@@ -1758,6 +1759,11 @@ namespace DivineDragon.MapTools
             {
                 sceneRenderer.RenderDocument(currentDocument, selectedTerrain);
             }
+        }
+
+        public DisposDocument GetCurrentDocument()
+        {
+            return currentDocument;
         }
     }
 }

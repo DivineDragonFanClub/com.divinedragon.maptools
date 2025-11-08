@@ -324,7 +324,6 @@ namespace DivineDragon.MapTools
                 {
                     TerrainPNGExporter.ExportToPNG(
                         selectedTerrain,
-                        terrainDatabase,
                         exportPixelsPerTile,
                         exportIncludeGrid,
                         exportGridColor,
@@ -904,7 +903,7 @@ namespace DivineDragon.MapTools
         
         private static void DrawAdvancedOperationPreview(int width, int height, float startX, float startZ, TerrainHeightCache heightCache, TerrainHeightSettings heightSettings)
         {
-            if (previewTerrains == null || terrainDatabase == null) return;
+            if (previewTerrains == null) return;
             
             // Draw current terrain in semi-transparent green
             Color currentColor = new Color(0f, 1f, 0f, 0.3f);
