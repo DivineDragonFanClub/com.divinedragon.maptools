@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using DivineDragon;
 using UnityEditor;
 using UnityEditor.SceneManagement;
@@ -280,7 +281,7 @@ namespace DivineDragon.MapTools
         // Relaxation settings are committed defaults; no EditorPrefs persistence
         
         private Vector2 scrollPosition;
-        private bool gridHeightFoldout = false;
+        private static bool gridHeightFoldout = false;
         private Vector2 paletteScrollPosition;
         private string terrainSearchFilter = "";
         
@@ -760,7 +761,7 @@ namespace DivineDragon.MapTools
             // Relaxation: committed defaults (no prefs load)
         }
         
-        private void SaveSettings()
+        private static void SaveSettings()
         {
             StoreCurrentTerrainHeight();
             EditorPrefs.SetBool(PREFS_SHOW_GRID, showGridLines);
@@ -976,9 +977,11 @@ namespace DivineDragon.MapTools
             if (uiTabIndex == 0)
             {
                 // Terrain Selection (always visible)
-                EditorGUILayout.Space(10);                
+                EditorGUILayout.Space(10);
                 Type terrainType = TerrainAssetAdapter.MapTerrainType ?? typeof(ScriptableObject);
                 ScriptableObject currentAsset = selectedTerrain?.Asset;
+
+                EditorGUILayout.BeginHorizontal();
                 EditorGUI.BeginChangeCheck();
                 ScriptableObject newAsset = (ScriptableObject)EditorGUILayout.ObjectField(
                     "Selected Terrain",
@@ -987,17 +990,15 @@ namespace DivineDragon.MapTools
                     false);
                 if (EditorGUI.EndChangeCheck())
                 {
-                    selectedTerrain = TerrainAssetAdapter.FromObject(newAsset);
-                    PruneMeshCaches(selectedTerrain);
-                    ApplyTerrainHeightForSelection();
-                    lastCachedTerrain = null;
-                    InvalidateVirtualGrid(selectedTerrain);
-                    TerrainRegionCache.ClearAll();
-                    s_LabelNodes.Clear();
-                    labelAlphaStates.Clear();
-                    SaveSettings();
-                    SceneView.RepaintAll();
+                    SetSelectedTerrain(TerrainAssetAdapter.FromObject(newAsset));
+                    paintableTerrainsDirty = true;
                 }
+
+                if (GUILayout.Button("Read from MapSetting", GUILayout.Width(170)))
+                {
+                    LoadTerrainFromActiveScene();
+                }
+                EditorGUILayout.EndHorizontal();
 
                 EditorGUILayout.Space(5);
 
@@ -3213,6 +3214,122 @@ namespace DivineDragon.MapTools
             GUI.backgroundColor = previousBg;
             
             EditorGUILayout.EndHorizontal();
+        }
+
+        private static void LoadTerrainFromActiveScene()
+        {
+            MonoBehaviour target = FindMapSettingComponent();
+            if (target == null)
+            {
+                Debug.LogWarning("[TerrainPaintTool] MapSetting component was not found in the active scene.");
+                return;
+            }
+
+            SerializedObject serializedObject = new SerializedObject(target);
+            serializedObject.Update();
+            SerializedProperty property = serializedObject.FindProperty("m_MapTerrain") ?? serializedObject.FindProperty("MapTerrain");
+            if (property != null && property.objectReferenceValue != null)
+            {
+                SelectTerrainFromObject(property.objectReferenceValue as ScriptableObject);
+                serializedObject.Dispose();
+                return;
+            }
+            serializedObject.Dispose();
+
+            // Fallback: use reflection to read public field.
+            var field = target.GetType().GetField("m_MapTerrain", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic) ??
+                        target.GetType().GetField("MapTerrain", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (field != null)
+            {
+                if (field.GetValue(target) is ScriptableObject asset)
+                {
+                    SelectTerrainFromObject(asset);
+                    return;
+                }
+            }
+
+            Debug.LogWarning("[TerrainPaintTool] MapSetting component found but no MapTerrain reference assigned.");
+        }
+
+        private static MonoBehaviour FindMapSettingComponent()
+        {
+            // Look for MapSetting component in active scene only
+            Scene activeScene = SceneManager.GetActiveScene();
+            if (!activeScene.IsValid() || !activeScene.isLoaded)
+            {
+                return null;
+            }
+
+            // Search through all root GameObjects in the active scene
+            foreach (GameObject root in activeScene.GetRootGameObjects())
+            {
+                if (root == null) continue;
+
+                // Check the root object and all its children for MapSetting component
+                foreach (MonoBehaviour behaviour in root.GetComponentsInChildren<MonoBehaviour>(true))
+                {
+                    if (behaviour == null) continue;
+
+                    Type behaviourType = behaviour.GetType();
+                    // Check if the type name is MapSetting (works even if from different assembly)
+                    if (behaviourType.Name == "MapSetting")
+                    {
+                        return behaviour;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        private static void SetSelectedTerrain(TerrainAssetAdapter adapter)
+        {
+            if (adapter == null)
+            {
+                selectedTerrain = null;
+                lastCachedTerrain = null;
+                InvalidateVirtualGrid(null);
+                TerrainRegionCache.ClearAll();
+                s_LabelNodes.Clear();
+                labelAlphaStates.Clear();
+                paintableTerrainsDirty = true;
+                SaveSettings();
+                SceneView.RepaintAll();
+                instance?.Repaint();
+                GUI.changed = true;
+                return;
+            }
+
+            selectedTerrain = adapter;
+            PruneMeshCaches(selectedTerrain);
+            ApplyTerrainHeightForSelection();
+            lastCachedTerrain = null;
+            InvalidateVirtualGrid(selectedTerrain);
+            TerrainRegionCache.ClearAll();
+            s_LabelNodes.Clear();
+            labelAlphaStates.Clear();
+            paintableTerrainsDirty = true;
+            SaveSettings();
+            SceneView.RepaintAll();
+            instance?.Repaint();
+            GUI.changed = true;
+        }
+
+        private static void SelectTerrainFromObject(ScriptableObject terrainAsset)
+        {
+            if (terrainAsset == null)
+            {
+                return;
+            }
+
+            var adapter = TerrainAssetAdapter.FromObject(terrainAsset);
+            if (adapter == null)
+            {
+                Debug.LogError($"[TerrainPaintTool] Failed to adapt terrain asset '{terrainAsset.name}'. Ensure it derives from Bridge.MapTerrain.", terrainAsset);
+                return;
+            }
+
+            SetSelectedTerrain(adapter);
         }
 
         private static List<TerrainType> GetPaintableTerrains()
