@@ -789,6 +789,22 @@ namespace DivineDragon.MapTools
             // Relaxation: committed defaults (no prefs save)
         }
 
+        private static void SaveSelectedTerrainAsset()
+        {
+            if (selectedTerrain?.Asset == null)
+            {
+                return;
+            }
+
+            EditorUtility.SetDirty(selectedTerrain.Asset);
+#if UNITY_2020_1_OR_NEWER
+            AssetDatabase.SaveAssetIfDirty(selectedTerrain.Asset);
+#else
+            AssetDatabase.SaveAssets();
+#endif
+            AssetDatabase.Refresh();
+        }
+
         private static void RequestToolRepaint(bool repaintScene = true)
         {
             SceneView.RepaintAll();
@@ -990,7 +1006,7 @@ namespace DivineDragon.MapTools
                     EditorGUI.BeginChangeCheck();
                     bool newFoldout = EditorGUILayout.Foldout(
                         gridHeightFoldout,
-                        new GUIContent("Grid Height & Sampling", "Adjust overlay height, raycast mode, and collider selection."),
+                        new GUIContent("Grid Height and Sampling", "Adjust overlay height, raycast mode, and collider selection."),
                         true);
                     if (EditorGUI.EndChangeCheck())
                     {
@@ -1082,9 +1098,48 @@ namespace DivineDragon.MapTools
                     bool disablePaintingControls = !terrainModeActive;
                     EditorGUI.BeginDisabledGroup(disablePaintingControls);
                     
-                    GUI.backgroundColor = paintMode ? Color.green : Color.white;
-                    if (GUILayout.Button(paintMode ? "Exit Paint Mode" : "Enter Paint Mode"))
+                    bool terrainAssetDirty = selectedTerrain?.Asset != null && EditorUtility.IsDirty(selectedTerrain.Asset);
+
+                    EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+                    EditorGUILayout.LabelField(
+                        terrainAssetDirty ? "*Unsaved terrain changes." : "No changes to save.",
+                        EditorStyles.wordWrappedMiniLabel);
+                    EditorGUI.BeginDisabledGroup(!terrainAssetDirty);
+                    if (GUILayout.Button("Save Terrain Asset (⌘S / Ctrl+S)"))
                     {
+                        SaveSelectedTerrainAsset();
+                        Repaint();
+                    }
+                    EditorGUI.EndDisabledGroup();
+                    EditorGUILayout.EndVertical();
+                    EditorGUILayout.Space(5);
+
+                    GUI.backgroundColor = paintMode ? Color.green : Color.white;
+                    string paintButtonLabel;
+                    if (!paintMode)
+                    {
+                        paintButtonLabel = "Enter Paint Mode";
+                    }
+                    else if (terrainAssetDirty)
+                    {
+                        paintButtonLabel = "Save and Exit Paint Mode";
+                    }
+                    else
+                    {
+                        paintButtonLabel = "Exit Paint Mode";
+                    }
+
+                    bool paintButtonClicked = GUILayout.Button(paintButtonLabel);
+                    GUI.backgroundColor = Color.white;
+
+                    if (paintButtonClicked)
+                    {
+                        if (paintMode && terrainAssetDirty)
+                        {
+                            SaveSelectedTerrainAsset();
+                            Repaint();
+                        }
+
                         paintMode = !paintMode;
                         if (paintMode)
                         {
@@ -1100,7 +1155,6 @@ namespace DivineDragon.MapTools
                         }
                         SceneView.RepaintAll();
                     }
-                    GUI.backgroundColor = Color.white;
                     
                     if (paintMode)
                     {
