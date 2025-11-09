@@ -197,7 +197,6 @@ namespace DivineDragon.MapTools
         // External tools (e.g., Dispos tool) can lock painting while keeping visualization
         private static SharedEditorMode sharedMode = SharedEditorMode.Terrain;
         private static TerrainAssetAdapter selectedTerrain;
-        private static bool visualizationEnabled = true;
         private static bool showGridLines = true;
         private static float textSize = 0.5f;
         private static Color textColor = Color.white;
@@ -266,7 +265,6 @@ namespace DivineDragon.MapTools
         
         private const string PREFS_PREFIX = "TerrainPaintTool_";
         
-        private const string PREFS_ENABLED = PREFS_PREFIX + "Enabled";
         private const string PREFS_SHOW_GRID = PREFS_PREFIX + "ShowGrid";
         private const string PREFS_TEXT_SIZE = PREFS_PREFIX + "TextSize";
         private const string PREFS_TEXT_COLOR = PREFS_PREFIX + "TextColor";
@@ -322,12 +320,12 @@ namespace DivineDragon.MapTools
 
         public static bool ShouldRenderTerrainOverlay()
         {
-            return sharedMode != SharedEditorMode.Off && visualizationEnabled && selectedTerrain != null;
+            return sharedMode != SharedEditorMode.Off && selectedTerrain != null;
         }
 
         public static bool ShouldRenderTerrainGrid()
         {
-            return sharedMode != SharedEditorMode.Off && visualizationEnabled && showGridLines && selectedTerrain != null;
+            return sharedMode != SharedEditorMode.Off && showGridLines && selectedTerrain != null;
         }
 
         // Legacy bridge for existing callers
@@ -723,7 +721,6 @@ namespace DivineDragon.MapTools
         private void LoadSettings()
         {
             LoadTerrainHeightPreferencesIfNeeded();
-            visualizationEnabled = EditorPrefs.GetBool(PREFS_ENABLED, true);
             showGridLines = EditorPrefs.GetBool(PREFS_SHOW_GRID, true);
             textSize = EditorPrefs.GetFloat(PREFS_TEXT_SIZE, 1.5f);
             gridThickness = EditorPrefs.GetFloat(PREFS_GRID_THICKNESS, 1f);
@@ -763,7 +760,6 @@ namespace DivineDragon.MapTools
         private void SaveSettings()
         {
             StoreCurrentTerrainHeight();
-            EditorPrefs.SetBool(PREFS_ENABLED, visualizationEnabled);
             EditorPrefs.SetBool(PREFS_SHOW_GRID, showGridLines);
             EditorPrefs.SetFloat(PREFS_TEXT_SIZE, textSize);
             EditorPrefs.SetFloat(PREFS_GRID_THICKNESS, gridThickness);
@@ -815,19 +811,8 @@ namespace DivineDragon.MapTools
             // MAIN PAGE header controls
             if (uiTabIndex == 0)
             {
-                // Enable Visualization is always visible
-                EditorGUI.BeginChangeCheck();
-                visualizationEnabled = EditorGUILayout.Toggle("Enable Visualization", visualizationEnabled);
-                if (EditorGUI.EndChangeCheck())
-                {
-                    SaveSettings();
-                    SceneView.RepaintAll();
-                }
-                
                 // Terrain Selection (always visible)
-                EditorGUILayout.Space(10);
-                EditorGUILayout.LabelField("Terrain Selection", EditorStyles.boldLabel);
-                
+                EditorGUILayout.Space(10);                
                 Type terrainType = TerrainAssetAdapter.MapTerrainType ?? typeof(ScriptableObject);
                 ScriptableObject currentAsset = selectedTerrain?.Asset;
                 EditorGUI.BeginChangeCheck();
@@ -854,12 +839,6 @@ namespace DivineDragon.MapTools
                 
                 if (selectedTerrain != null)
                 {
-                    EditorGUILayout.Space(5);
-                    EditorGUILayout.HelpBox($"Grid Size: {selectedTerrain.Width} x {selectedTerrain.Height}\n" +
-                                           $"Origin: ({selectedTerrain.OriginX}, {selectedTerrain.OriginZ})\n" +
-                                           $"Total Tiles: {selectedTerrain.Width * selectedTerrain.Height}", 
-                                           MessageType.Info);
-
                     TerrainHeightSettings heightSettings = GetHeightSettings(selectedTerrain);
 
                     EditorGUI.BeginChangeCheck();
@@ -1069,7 +1048,7 @@ namespace DivineDragon.MapTools
                 EditorGUI.BeginChangeCheck();
                     
                     bool terrainModeActive = IsTerrainEditingEnabled;
-                    bool disablePaintingControls = !visualizationEnabled || !terrainModeActive;
+                    bool disablePaintingControls = !terrainModeActive;
                     EditorGUI.BeginDisabledGroup(disablePaintingControls);
                     
                     GUI.backgroundColor = paintMode ? Color.green : Color.white;
@@ -1352,7 +1331,7 @@ namespace DivineDragon.MapTools
                 return;
             }
 
-            if (!visualizationEnabled || selectedTerrain == null)
+            if (selectedTerrain == null)
             {
                 PruneMeshCaches(selectedTerrain);
                 return;
