@@ -2,7 +2,8 @@
     "name": "DivineDragon.MapTools",
     "rootNamespace": "DivineDragon.MapTools",
     "references": [
-        "GUID:d7d4cd2809fc74e3cb49c47b358359ef"
+        "GUID:d7d4cd2809fc74e3cb49c47b358359ef",
+        "GUID:332f144202c5345808e8db28bf958969"
     ],
     "includePlatforms": [
         "Editor"

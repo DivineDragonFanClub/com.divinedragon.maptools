@@ -64,11 +64,8 @@ namespace DivineDragon.MapTools
 
         private static bool watchersRegistered;
 
-        private const string GameDataRoot = "/Users/doge/Documents/clean_engage_200/Data/StreamingAssets/aa/Switch";
-        private const string GameDataAssetRoot = GameDataRoot + "/fe_assets_gamedata";
-        private const string GameDataSharePath = "Assets/Share/Addressables/Patch/Patch3/GameData";
-        private const string PERSON_XML_PATH = GameDataSharePath + "/Person.xml";
-        private const string JOB_XML_PATH = GameDataSharePath + "/Job.xml";
+        private const string PERSON_XML_PATH = MapToolsPaths.GameDataShareAssetPath + "/Person.xml";
+        private const string JOB_XML_PATH = MapToolsPaths.GameDataShareAssetPath + "/Job.xml";
         private const string ICON_FOLDER = "Assets/Editor/Unit Icons and the Last Engage";
         private const string PERSON_BUNDLE_TXT = "Assets/person.bytes.bundle.txt";
         private const string JOB_BUNDLE_TXT = "Assets/job.bytes.bundle.txt";

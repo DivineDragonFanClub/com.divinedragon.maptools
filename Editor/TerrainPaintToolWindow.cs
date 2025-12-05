@@ -189,10 +189,6 @@ namespace DivineDragon.MapTools
     
     public partial class TerrainPaintToolWindow : EditorWindow
     {
-        private const string GameDataRootPath = "/Users/doge/Documents/clean_engage_200/Data/StreamingAssets/aa/Switch";
-        private const string GameDataAssetRootPath = GameDataRootPath + "/fe_assets_gamedata";
-        private const string TerrainBundlesDirectory = GameDataAssetRootPath + "/terrains";
-        private const string TerrainXmlBundlePath = GameDataAssetRootPath + "/terrain.xml.bundle";
 
         private static TerrainPaintToolWindow instance;
         // External tools (e.g., Dispos tool) can lock painting while keeping visualization
@@ -2921,11 +2917,11 @@ namespace DivineDragon.MapTools
 
         private static void ExtractTerrainXml()
         {
-            if (!File.Exists(TerrainXmlBundlePath))
+            if (!File.Exists(MapToolsPaths.TerrainXmlBundlePath))
             {
                 EditorUtility.DisplayDialog(
                     "Terrain XML",
-                    $"Bundle not found at:\n{TerrainXmlBundlePath}\n\nUpdate the path in TerrainPaintToolWindow to match your Engage dump.",
+                    $"Bundle not found at:\n{MapToolsPaths.TerrainXmlBundlePath}\n\nConfigure your game data path in Project Settings → Divine Dragon.",
                     "OK");
                 return;
             }
@@ -2933,7 +2929,7 @@ namespace DivineDragon.MapTools
             EditorUtility.DisplayProgressBar("Terrain Paint Tool", "Extracting Terrain.xml...", 0.4f);
             try
             {
-                bool success = Dumper.ExtractAssetAtPath(TerrainXmlBundlePath);
+                bool success = Dumper.ExtractAssetAtPath(MapToolsPaths.TerrainXmlBundlePath);
                 EditorUtility.ClearProgressBar();
 
                 if (!success)

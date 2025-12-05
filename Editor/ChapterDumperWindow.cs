@@ -12,23 +12,15 @@ namespace DivineDragon.MapTools
     public class ChapterDumperWindow : EditorWindow
     {
         private const string WindowTitle = "Chapter Dumper";
-        private const string ChapterBundlePath = "/Users/doge/Documents/clean_engage_200/Data/StreamingAssets/aa/Switch/fe_assets_gamedata/chapter.xml.bundle";
-        private const string ChapterAssetPath = "Assets/Share/Addressables/Patch/Patch3/GameData/Chapter.xml";
-        private const string GameDataRoot = "/Users/doge/Documents/clean_engage_200/Data/StreamingAssets/aa/Switch";
-        private const string GameDataAssetRoot = GameDataRoot + "/fe_assets_gamedata";
-        private const string GameDataShareAssetPath = "Assets/Share/Addressables/Patch/Patch3/GameData";
-        private const string TerrainXmlBundlePath = GameDataAssetRoot + "/terrain.xml.bundle";
-        private const string TerrainDirectory = GameDataAssetRoot + "/terrains";
-        private const string DisposDirectory = GameDataAssetRoot + "/dispos";
 
         // Supporting XML bundles to stage alongside map dumps if not already imported
-        private static readonly SupportAsset[] SupportingAssets =
+        private static SupportAsset[] GetSupportingAssets() => new[]
         {
-            new SupportAsset(GameDataShareAssetPath + "/Person.xml", GameDataAssetRoot + "/person.xml.bundle"),
-            new SupportAsset(GameDataShareAssetPath + "/Job.xml", GameDataAssetRoot + "/job.xml.bundle"),
-            new SupportAsset(GameDataShareAssetPath + "/Item.xml", GameDataAssetRoot + "/item.xml.bundle"),
-            new SupportAsset(GameDataShareAssetPath + "/Skill.xml", GameDataAssetRoot + "/skill.xml.bundle"),
-            new SupportAsset(TerrainDefinitions.TerrainXmlAssetRelativePath, TerrainXmlBundlePath)
+            new SupportAsset(MapToolsPaths.GameDataShareAssetPath + "/Person.xml", MapToolsPaths.GameDataAssetRoot + "/person.xml.bundle"),
+            new SupportAsset(MapToolsPaths.GameDataShareAssetPath + "/Job.xml", MapToolsPaths.GameDataAssetRoot + "/job.xml.bundle"),
+            new SupportAsset(MapToolsPaths.GameDataShareAssetPath + "/Item.xml", MapToolsPaths.GameDataAssetRoot + "/item.xml.bundle"),
+            new SupportAsset(MapToolsPaths.GameDataShareAssetPath + "/Skill.xml", MapToolsPaths.GameDataAssetRoot + "/skill.xml.bundle"),
+            new SupportAsset(TerrainDefinitions.TerrainXmlAssetRelativePath, MapToolsPaths.TerrainXmlBundlePath)
         };
 
         private readonly List<ChapterRecord> chapters = new List<ChapterRecord>();
@@ -60,6 +52,14 @@ namespace DivineDragon.MapTools
 
         private void OnGUI()
         {
+            if (!MapToolsPaths.IsConfigured)
+            {
+                EditorGUILayout.HelpBox(
+                    "Game data path not configured.\n\nGo to Project Settings → Divine Dragon and set the path to settings.json from your game dump.",
+                    MessageType.Error);
+                return;
+            }
+
             EditorGUILayout.LabelField("Chapter XML Status", EditorStyles.boldLabel);
 
             if (!string.IsNullOrEmpty(chapterAssetPath))
@@ -238,7 +238,7 @@ namespace DivineDragon.MapTools
 
         private void EnsureSupportingAssets(List<string> extractionTargets)
         {
-            foreach (var support in SupportingAssets)
+            foreach (var support in GetSupportingAssets())
             {
                 string projectPath = Path.Combine(ProjectRootPath(), support.ExpectedAssetPath).Replace("\\", "/");
                 if (!File.Exists(projectPath) && File.Exists(support.BundlePath))
@@ -258,7 +258,7 @@ namespace DivineDragon.MapTools
 
             foreach (string candidate in GenerateSuffixCandidates(suffix))
             {
-                string bundlePath = $"{GameDataRoot}/fe_scenes_fld_{candidate}.bundle";
+                string bundlePath = $"{MapToolsPaths.GameBuildPath}/fe_scenes_fld_{candidate}.bundle";
                 if (File.Exists(bundlePath))
                 {
                     extractionTargets.Add(bundlePath);
@@ -280,7 +280,7 @@ namespace DivineDragon.MapTools
 
             foreach (string candidate in GenerateSuffixCandidates(suffix))
             {
-                string bundlePath = $"{TerrainDirectory}/mapterrain_{candidate}.bundle";
+                string bundlePath = $"{MapToolsPaths.TerrainDirectory}/mapterrain_{candidate}.bundle";
                 if (File.Exists(bundlePath))
                 {
                     extractionTargets.Add(bundlePath);
@@ -302,7 +302,7 @@ namespace DivineDragon.MapTools
 
             foreach (string candidate in GenerateSuffixCandidates(suffix))
             {
-                string bundlePath = $"{DisposDirectory}/{candidate}.xml.bundle";
+                string bundlePath = $"{MapToolsPaths.DisposDirectory}/{candidate}.xml.bundle";
                 if (File.Exists(bundlePath))
                 {
                     extractionTargets.Add(bundlePath);
@@ -316,9 +316,9 @@ namespace DivineDragon.MapTools
 
         private void ExtractChapterXml()
         {
-            if (!File.Exists(ChapterBundlePath))
+            if (!File.Exists(MapToolsPaths.ChapterBundlePath))
             {
-                lastMessage = $"Bundle not found: {ChapterBundlePath}";
+                lastMessage = $"Bundle not found: {MapToolsPaths.ChapterBundlePath}";
                 return;
             }
 
@@ -327,7 +327,7 @@ namespace DivineDragon.MapTools
                 isExtracting = true;
                 EditorUtility.DisplayProgressBar(WindowTitle, "Extracting Chapter.xml...", 0.5f);
 
-                bool success = Dumper.ExtractAssetAtPath(ChapterBundlePath);
+                bool success = Dumper.ExtractAssetAtPath(MapToolsPaths.ChapterBundlePath);
                 AssetDatabase.Refresh();
                 RefreshChapterLocation();
 
@@ -352,12 +352,12 @@ namespace DivineDragon.MapTools
 
             try
             {
-                if (!string.IsNullOrEmpty(ChapterAssetPath))
+                if (!string.IsNullOrEmpty(MapToolsPaths.ChapterAssetPath))
                 {
-                    string candidateFullPath = Path.Combine(ProjectRootPath(), ChapterAssetPath).Replace("\\", "/");
+                    string candidateFullPath = Path.Combine(ProjectRootPath(), MapToolsPaths.ChapterAssetPath).Replace("\\", "/");
                     if (File.Exists(candidateFullPath))
                     {
-                        chapterAssetPath = ChapterAssetPath;
+                        chapterAssetPath = MapToolsPaths.ChapterAssetPath;
                     }
                 }
 
@@ -451,7 +451,7 @@ namespace DivineDragon.MapTools
                 foreach (string candidate in GenerateSuffixCandidates(suffix))
                 {
                     string fileName = $"fe_scenes_fld_{candidate}.bundle";
-                    string fullPath = Path.Combine(GameDataRoot, fileName).Replace("\\", "/");
+                    string fullPath = Path.Combine(MapToolsPaths.GameBuildPath, fileName).Replace("\\", "/");
                     if (File.Exists(fullPath))
                     {
                         displayScene = fileName;
@@ -463,7 +463,7 @@ namespace DivineDragon.MapTools
                 foreach (string candidate in GenerateSuffixCandidates(suffix))
                 {
                     string fileName = $"mapterrain_{candidate}.bundle";
-                    string fullPath = Path.Combine(TerrainDirectory, fileName).Replace("\\", "/");
+                    string fullPath = Path.Combine(MapToolsPaths.TerrainDirectory, fileName).Replace("\\", "/");
                     if (File.Exists(fullPath))
                     {
                         displayTerrain = fileName;
@@ -475,7 +475,7 @@ namespace DivineDragon.MapTools
                 foreach (string candidate in GenerateSuffixCandidates(suffix))
                 {
                     string fileName = $"{candidate}.xml.bundle";
-                    string fullPath = Path.Combine(DisposDirectory, fileName).Replace("\\", "/");
+                    string fullPath = Path.Combine(MapToolsPaths.DisposDirectory, fileName).Replace("\\", "/");
                     if (File.Exists(fullPath))
                     {
                         displayDispos = fileName;
