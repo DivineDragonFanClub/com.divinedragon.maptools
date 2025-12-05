@@ -253,7 +253,7 @@ namespace DivineDragon.MapTools
         // Brush painting variables
         private static bool paintMode = false;
         private static string selectedBrushTerrain = "";
-        private static int brushSize = 1;
+        private const int brushSize = 1;
         private static Vector2Int hoveredTile = new Vector2Int(-1, -1);
         private static bool isMouseOverGrid = false;
 
@@ -592,6 +592,12 @@ namespace DivineDragon.MapTools
             return e != null && (e.control || e.command);
         }
 
+        // Modifier detection for fill (Shift without Ctrl/Cmd)
+        private static bool IsFillModifier(Event e)
+        {
+            return e != null && e.shift && !e.control && !e.command;
+        }
+
         private static bool IsEmptyTerrain(string terrainId) => TerrainVirtualGridCache.IsEmptyTerrain(terrainId);
 
         private static TerrainVirtualGrid GetVirtualGrid(TerrainAssetAdapter terrain) => TerrainVirtualGridCache.GetGrid(terrain);
@@ -672,6 +678,24 @@ namespace DivineDragon.MapTools
                 InvalidateTerrainHeightCache(terrain);
                 InvalidateOverlayMesh(terrain);
             }
+        }
+
+        /// <summary>
+        /// Called externally (e.g., from SwapTerrainDialog) to notify the tool that terrain data has changed.
+        /// </summary>
+        public static void NotifyTerrainDataChanged(TerrainAssetAdapter terrain)
+        {
+            if (terrain != null)
+            {
+                islandCache.Remove(terrain);
+                InvalidateVirtualGrid(terrain);
+                TerrainRegionCache.Invalidate(terrain);
+                InvalidateTerrainHeightCache(terrain);
+                InvalidateOverlayMesh(terrain);
+                paintableTerrainsDirty = true;
+            }
+            SceneView.RepaintAll();
+            instance?.Repaint();
         }
 
         // Per-session caches
@@ -1156,14 +1180,7 @@ namespace DivineDragon.MapTools
                     if (paintMode)
                     {
                         EditorGUILayout.Space(5);
-                        // Only odd numbers for brush size (1x1, 3x3, 5x5, 7x7)
-                        int brushSteps = (brushSize - 1) / 2;
-                        brushSteps = EditorGUILayout.IntSlider("Brush Size", brushSteps, 0, 3);
-                        brushSize = brushSteps * 2 + 1;
-                        EditorGUILayout.LabelField($"Brush: {brushSize}x{brushSize}", EditorStyles.miniLabel);
-                        
-                        EditorGUILayout.Space(5);
-                        
+
                     // Status: Hovering over
                     EditorGUILayout.BeginHorizontal();
                     EditorGUILayout.LabelField("Hovering over:", GUILayout.Width(100));
@@ -1319,7 +1336,13 @@ namespace DivineDragon.MapTools
                     EditorGUILayout.EndVertical();
                     EditorGUILayout.EndScrollView();
 
-                    EditorGUILayout.HelpBox("Left Click: Paint | Ctrl/Cmd+Click: Sample/Pick", MessageType.Info);
+                    EditorGUILayout.Space(5);
+                    if (GUILayout.Button("Swap Terrains..."))
+                    {
+                        SwapTerrainDialog.Show(selectedTerrain, GetPaintableTerrains());
+                    }
+
+                    EditorGUILayout.HelpBox("Left Click: Paint | Shift+Click: Fill Island | Ctrl/Cmd+Click: Sample", MessageType.Info);
                     }
                     
                     EditorGUI.EndDisabledGroup(); // End disable group for visualization check
@@ -1527,7 +1550,17 @@ namespace DivineDragon.MapTools
                 if (!IsEmptyTerrain(hoveredTerrainIdForHighlight))
                 {
                     bool isSampling = IsSamplingModifier(Event.current);
-                    if (paintMode && !isSampling && !IsEmptyTerrain(selectedBrushTerrain))
+                    bool isFilling = IsFillModifier(Event.current);
+                    if (paintMode && isFilling && !IsEmptyTerrain(selectedBrushTerrain))
+                    {
+                        // Fill preview: show entire island that would be filled
+                        if (hoveredTerrainIdForHighlight != selectedBrushTerrain)
+                        {
+                            currentHighlightRegion = TerrainRegionCache.GetSameTerrainRegion(selectedTerrain, currentGrid, hoveredTile, width, height, useCache: true);
+                            highlightTerrainId = selectedBrushTerrain;
+                        }
+                    }
+                    else if (paintMode && !isSampling && !isFilling && !IsEmptyTerrain(selectedBrushTerrain))
                     {
                         if (hoveredTerrainIdForHighlight == selectedBrushTerrain)
                         {
@@ -1929,6 +1962,10 @@ namespace DivineDragon.MapTools
                         {
                             PickTerrain(hoveredTile, width);
                         }
+                        else if (IsFillModifier(currentEvent) && currentEvent.type == EventType.MouseDown)
+                        {
+                            FillIsland(hoveredTile, width, height);
+                        }
                         else
                         {
                             if (currentEvent.type == EventType.MouseDown)
@@ -2044,6 +2081,42 @@ namespace DivineDragon.MapTools
                 MarkTerrainDirty(selectedTerrain);
                 SceneView.RepaintAll();
             }
+        }
+
+        private static void FillIsland(Vector2Int clickedTile, int width, int height)
+        {
+            if (IsEmptyTerrain(selectedBrushTerrain) || selectedTerrain == null) return;
+
+            TerrainVirtualGrid grid = GetVirtualGrid(selectedTerrain);
+            if (grid == null) return;
+
+            string clickedTerrain = grid.GetTerrainId(clickedTile.x, clickedTile.y);
+            if (IsEmptyTerrain(clickedTerrain) || clickedTerrain == selectedBrushTerrain) return;
+
+            // Get contiguous region of the clicked terrain
+            var region = TerrainRegionCache.GetSameTerrainRegion(selectedTerrain, grid, clickedTile, width, height, useCache: false);
+            if (region.Count == 0) return;
+
+            // Register undo
+            if (selectedTerrain.Asset != null)
+            {
+                Undo.RegisterCompleteObjectUndo(selectedTerrain.Asset, "Fill Terrain Island");
+            }
+
+            // Fill all tiles in region
+            var tiles = selectedTerrain.m_Terrains;
+            foreach (var tile in region)
+            {
+                int actualIndex = grid.GetActualIndex(tile.x, tile.y);
+                if (actualIndex >= 0 && actualIndex < tiles.Length)
+                {
+                    tiles[actualIndex] = selectedBrushTerrain;
+                }
+            }
+
+            // Mark dirty and invalidate caches
+            MarkTerrainDirty(selectedTerrain);
+            SceneView.RepaintAll();
         }
 
         private static HashSet<Vector2Int> FindAdjacentIsland(Vector2Int centerTile, string targetTerrain, int width, int height)

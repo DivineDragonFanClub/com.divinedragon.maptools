@@ -50,7 +50,7 @@ namespace DivineDragon.MapTools
         
         private string[] availableFiles;
         private int selectedFileIndex = -1;
-        private string disposFolderPath = "Assets/Share/Addressables/GameData/Dispos";
+        private string disposFolderPath = MapToolsPaths.DisposShareAssetPath;
         
         private bool showGrid = true;
         private bool showLabels = true;
