@@ -339,7 +339,24 @@ namespace DivineDragon.MapTools
                 SetSharedEditorMode(SharedEditorMode.Terrain);
             }
         }
-        
+
+        /// <summary>
+        /// Gets the currently selected terrain in the paint tool.
+        /// Used by TerrainMinimapWindow to sync with the main editor.
+        /// </summary>
+        public static TerrainAssetAdapter SelectedTerrain => selectedTerrain;
+
+        /// <summary>
+        /// Sets the active brush terrain by TID.
+        /// Used by TerrainMinimapWindow to sample terrain from the minimap.
+        /// </summary>
+        public static void SetBrushTerrain(string tid)
+        {
+            if (string.IsNullOrEmpty(tid)) return;
+            selectedBrushTerrain = tid;
+            instance?.Repaint();
+        }
+
         private void OnEnable()
         {
             instance = this;
@@ -681,6 +698,11 @@ namespace DivineDragon.MapTools
         }
 
         /// <summary>
+        /// Event fired when terrain data changes. Used by minimap and other windows to refresh.
+        /// </summary>
+        public static event System.Action<TerrainAssetAdapter> OnTerrainDataChanged;
+
+        /// <summary>
         /// Called externally (e.g., from SwapTerrainDialog) to notify the tool that terrain data has changed.
         /// </summary>
         public static void NotifyTerrainDataChanged(TerrainAssetAdapter terrain)
@@ -696,6 +718,7 @@ namespace DivineDragon.MapTools
             }
             SceneView.RepaintAll();
             instance?.Repaint();
+            OnTerrainDataChanged?.Invoke(terrain);
         }
 
         // Per-session caches
@@ -1337,10 +1360,16 @@ namespace DivineDragon.MapTools
                     EditorGUILayout.EndScrollView();
 
                     EditorGUILayout.Space(5);
+                    EditorGUILayout.BeginHorizontal();
                     if (GUILayout.Button("Swap Terrains..."))
                     {
                         SwapTerrainDialog.Show(selectedTerrain, GetPaintableTerrains());
                     }
+                    if (GUILayout.Button("Minimap"))
+                    {
+                        TerrainMinimapWindow.ShowWindow();
+                    }
+                    EditorGUILayout.EndHorizontal();
 
                     EditorGUILayout.HelpBox("Left Click: Paint | Shift+Click: Fill Island | Ctrl/Cmd+Click: Sample", MessageType.Info);
                     }
