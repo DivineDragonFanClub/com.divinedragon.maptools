@@ -8,6 +8,11 @@ namespace DivineDragon.MapTools
     {
         // Keep in sync with TerrainPaintToolWindow.TILE_SIZE (world units per tile)
         private const float TILE_SIZE = 5f;
+        private const float MIN_CAMERA_DISTANCE = 1f;
+        private const float MAX_CAMERA_DISTANCE = 5000f;
+        private const float MIN_ORTHO_SIZE = 0.5f;
+        private const float MAX_ORTHO_SIZE = 5000f;
+        private const float FRUSTUM_INSET_RATIO = 0.02f; // shrink drawn frustum slightly to better match viewport
 
         // State
         private TerrainAssetAdapter terrain;
@@ -27,9 +32,12 @@ namespace DivineDragon.MapTools
         private string hoveredTerrainName;
         private bool isDraggingMinimap;
         private Vector2 lastDragTile = new Vector2(float.MinValue, float.MinValue);
+        private bool naturalScroll = false;
 
         // Reference map browsing
         private string referenceMapPath;
+
+        private const string PREFS_NATURAL_SCROLL = "TerrainMinimap_NaturalScroll";
 
         [MenuItem("Window/Divine Dragon/Terrain Minimap")]
         public static void ShowWindow()
@@ -61,6 +69,7 @@ namespace DivineDragon.MapTools
             SceneView.duringSceneGui += OnSceneGUI;
             EditorApplication.update += OnEditorUpdate;
             TerrainPaintToolWindow.OnTerrainDataChanged += OnTerrainDataChanged;
+            naturalScroll = EditorPrefs.GetBool(PREFS_NATURAL_SCROLL, false);
         }
 
         private void OnDisable()
@@ -140,6 +149,14 @@ namespace DivineDragon.MapTools
                 {
                     SyncWithPaintTool();
                 }
+            }
+
+            GUILayout.Space(6);
+            bool newNaturalScroll = GUILayout.Toggle(naturalScroll, "Natural Scroll", EditorStyles.toolbarButton, GUILayout.Width(100));
+            if (newNaturalScroll != naturalScroll)
+            {
+                naturalScroll = newNaturalScroll;
+                EditorPrefs.SetBool(PREFS_NATURAL_SCROLL, naturalScroll);
             }
 
             EditorGUILayout.EndHorizontal();
@@ -292,6 +309,14 @@ namespace DivineDragon.MapTools
                 Color frustumColor = new Color(1f, 1f, 0f, 0.9f);
                 float thickness = 2f;
 
+                // Slightly inset to better match actual viewport cropping
+                Vector2 center = (corners[0] + corners[1] + corners[2] + corners[3]) * 0.25f;
+                float insetFactor = 1f - FRUSTUM_INSET_RATIO;
+                for (int i = 0; i < 4; i++)
+                {
+                    corners[i] = center + (corners[i] - center) * insetFactor;
+                }
+
                 DrawLineLocal(corners[0], corners[1], frustumColor, thickness);
                 DrawLineLocal(corners[1], corners[2], frustumColor, thickness);
                 DrawLineLocal(corners[2], corners[3], frustumColor, thickness);
@@ -390,6 +415,15 @@ namespace DivineDragon.MapTools
                 return;
             }
 
+            // Handle zoom with scroll wheel inside minimap
+            if (mouseInside && e.type == EventType.ScrollWheel)
+            {
+                ZoomSceneView(e.delta.y);
+                e.Use();
+                Repaint();
+                return;
+            }
+
             // Convert mouse position to tile coordinates
             float clampedX = Mathf.Clamp(mousePos.x, minimapRect.xMin, minimapRect.xMax);
             float clampedY = Mathf.Clamp(mousePos.y, minimapRect.yMin, minimapRect.yMax);
@@ -466,6 +500,34 @@ namespace DivineDragon.MapTools
             Repaint();
         }
 
+        private void ZoomSceneView(float scrollDelta)
+        {
+            var sv = SceneView.lastActiveSceneView;
+            if (sv == null) return;
+
+            // Respect natural scroll preference (invert if needed)
+            float direction = naturalScroll ? 1f : -1f;
+            float factor = Mathf.Exp(scrollDelta * direction * 0.05f);
+            factor = Mathf.Clamp(factor, 0.01f, 100f);
+
+            if (sv.orthographic)
+            {
+                float newSize = Mathf.Clamp(sv.size * factor, MIN_ORTHO_SIZE, MAX_ORTHO_SIZE);
+                sv.size = newSize;
+                sv.Repaint();
+                return;
+            }
+
+            if (sv.camera == null) return;
+
+            float currentDistance = Vector3.Distance(sv.camera.transform.position, sv.pivot);
+            currentDistance = Mathf.Max(currentDistance, 0.0001f);
+            float newDistance = Mathf.Clamp(currentDistance * factor, MIN_CAMERA_DISTANCE, MAX_CAMERA_DISTANCE);
+
+            sv.LookAt(sv.pivot, sv.rotation, newDistance);
+            sv.Repaint();
+        }
+
         private void JumpToTile(float tileX, float tileY)
         {
             if (terrain == null) return;
@@ -509,7 +571,7 @@ namespace DivineDragon.MapTools
             else
             {
                 string hint = isCurrentMapMode
-                    ? "Click: Jump | Ctrl+Click: Sample"
+                    ? "Click/Drag: Move | Scroll: Zoom | Ctrl+Click: Sample"
                     : "Ctrl+Click: Sample brush";
                 EditorGUILayout.LabelField(hint, EditorStyles.miniLabel);
             }
