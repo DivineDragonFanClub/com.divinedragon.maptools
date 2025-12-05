@@ -25,6 +25,8 @@ namespace DivineDragon.MapTools
         private Vector2Int hoveredTile = new Vector2Int(-1, -1);
         private string hoveredTerrainTid;
         private string hoveredTerrainName;
+        private bool isDraggingMinimap;
+        private Vector2 lastDragTile = new Vector2(float.MinValue, float.MinValue);
 
         // Reference map browsing
         private string referenceMapPath;
@@ -378,7 +380,9 @@ namespace DivineDragon.MapTools
             Event e = Event.current;
             Vector2 mousePos = e.mousePosition;
 
-            if (!minimapRect.Contains(mousePos))
+            bool mouseInside = minimapRect.Contains(mousePos);
+
+            if (!mouseInside && !isDraggingMinimap)
             {
                 hoveredTile = new Vector2Int(-1, -1);
                 hoveredTerrainTid = null;
@@ -387,16 +391,23 @@ namespace DivineDragon.MapTools
             }
 
             // Convert mouse position to tile coordinates
-            float relX = (mousePos.x - minimapRect.x) / minimapRect.width;
-            float relY = (mousePos.y - minimapRect.y) / minimapRect.height;
+            float clampedX = Mathf.Clamp(mousePos.x, minimapRect.xMin, minimapRect.xMax);
+            float clampedY = Mathf.Clamp(mousePos.y, minimapRect.yMin, minimapRect.yMax);
 
-            // Map from GUI position (top-left origin) to displayed tile coordinates
-            int displayTileX = Mathf.FloorToInt(relX * terrain.m_Width);
-            int displayTileY = Mathf.FloorToInt(relY * terrain.m_Height);
+            float relX = (clampedX - minimapRect.x) / minimapRect.width;
+            float relY = (clampedY - minimapRect.y) / minimapRect.height;
+
+            // Map from GUI position (top-left origin) to displayed tile coordinates (floats for smooth drag)
+            float displayX = Mathf.Clamp(relX * terrain.m_Width, 0f, terrain.m_Width - 0.0001f);
+            float displayY = Mathf.Clamp(relY * terrain.m_Height, 0f, terrain.m_Height - 0.0001f);
+            int displayTileX = Mathf.FloorToInt(displayX);
+            int displayTileY = Mathf.FloorToInt(displayY);
 
             // Convert displayed tile back to world-space tile index
             int worldTileX = flipX ? terrain.m_Width - 1 - displayTileX : displayTileX;
             int worldTileY = flipY ? displayTileY : terrain.m_Height - 1 - displayTileY;
+            float worldTileXFloat = flipX ? terrain.m_Width - 1 - displayX : displayX;
+            float worldTileYFloat = flipY ? displayY : terrain.m_Height - 1 - displayY;
 
             worldTileX = Mathf.Clamp(worldTileX, 0, terrain.m_Width - 1);
             worldTileY = Mathf.Clamp(worldTileY, 0, terrain.m_Height - 1);
@@ -426,17 +437,36 @@ namespace DivineDragon.MapTools
                 }
                 else
                 {
-                    // Jump camera to tile
-                    JumpToTile(worldTileX, worldTileY);
+                    // Jump camera to tile and start drag-pan (continuous)
+                    JumpToTile(worldTileXFloat, worldTileYFloat);
+                    isDraggingMinimap = true;
+                    lastDragTile = new Vector2(worldTileXFloat, worldTileYFloat);
                 }
 
                 e.Use();
             }
 
+            if (e.type == EventType.MouseDrag && isDraggingMinimap && e.button == 0)
+            {
+                Vector2 current = new Vector2(worldTileXFloat, worldTileYFloat);
+                if (!Mathf.Approximately(current.x, lastDragTile.x) || !Mathf.Approximately(current.y, lastDragTile.y))
+                {
+                    JumpToTile(worldTileXFloat, worldTileYFloat);
+                    lastDragTile = current;
+                }
+                e.Use();
+            }
+
+            if (e.type == EventType.MouseUp && e.button == 0)
+            {
+                isDraggingMinimap = false;
+                lastDragTile = new Vector2(float.MinValue, float.MinValue);
+            }
+
             Repaint();
         }
 
-        private void JumpToTile(int tileX, int tileY)
+        private void JumpToTile(float tileX, float tileY)
         {
             if (terrain == null) return;
 
@@ -450,7 +480,18 @@ namespace DivineDragon.MapTools
             float worldZ = terrain.m_Z + offset.z + (tileY + 0.5f) * TILE_SIZE;
             float worldY = sv.pivot.y; // Keep current height
 
-            sv.pivot = new Vector3(worldX, worldY, worldZ);
+            // Smooth movement by interpolating toward target when dragging
+            const float dragLerp = 0.35f;
+            bool isDragUpdate = isDraggingMinimap;
+            Vector3 target = new Vector3(worldX, worldY, worldZ);
+            if (isDragUpdate)
+            {
+                sv.pivot = Vector3.Lerp(sv.pivot, target, dragLerp);
+            }
+            else
+            {
+                sv.pivot = target;
+            }
             sv.Repaint();
         }
 
