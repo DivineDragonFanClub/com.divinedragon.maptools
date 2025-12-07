@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using UnityEditor;
 using UnityEngine;
 
@@ -12,7 +13,8 @@ namespace DivineDragon.MapTools
         private const float MAX_CAMERA_DISTANCE = 5000f;
         private const float MIN_ORTHO_SIZE = 0.5f;
         private const float MAX_ORTHO_SIZE = 5000f;
-        private const float FRUSTUM_INSET_RATIO = 0.02f; // shrink drawn frustum slightly to better match viewport
+        private const float VIEWPORT_INSET = 0.02f;  // Small inset for numerical stability
+        private static Material lineMaterial;
 
         // State
         private TerrainAssetAdapter terrain;
@@ -263,29 +265,91 @@ namespace DivineDragon.MapTools
                 return;
 
             Camera cam = sv.camera;
-            float terrainY = 0f; // Assume terrain is at Y=0
+            Vector3 camPos = cam.transform.position;
+            float terrainY = TerrainPaintToolWindow.GetWorldOffset().y;
 
-            // Get the four corners of what's visible on the terrain plane
-            Vector2[] corners = new Vector2[4];
-            bool allValid = true;
+            // Cast center ray to get reference distance
+            Ray centerRay = cam.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0));
+            Vector3? centerHit = RayPlaneIntersect(centerRay, terrainY);
 
-            // Viewport corners: bottom-left, bottom-right, top-right, top-left
+            if (!centerHit.HasValue)
+            {
+                // Camera not looking at terrain - show crosshair at pivot
+                GUI.BeginClip(minimapRect);
+                Vector2 pivotLocal = WorldToMinimapLocal(sv.pivot, minimapRect);
+                DrawCrosshairLocal(pivotLocal, minimapRect.size);
+                GUI.EndClip();
+                return;
+            }
+
+            // Auto-calculate multiplier based on FOV and pitch angle
+            float pitchDeg = cam.transform.eulerAngles.x;
+            if (pitchDeg > 180f) pitchDeg -= 360f; // Normalize to -180 to 180
+
+            float pitchRad = Mathf.Abs(pitchDeg) * Mathf.Deg2Rad;
+            float halfFovRad = cam.fieldOfView * 0.5f * Mathf.Deg2Rad;
+
+            // Natural multiplier: ratio of corner distance to center distance
+            float topCornerAngle = pitchRad - halfFovRad;
+            float autoMultiplier;
+
+            if (topCornerAngle > 0.15f) // ~8.5 degrees, safe from division issues
+            {
+                autoMultiplier = Mathf.Sin(pitchRad) / Mathf.Sin(topCornerAngle);
+                // Reduce slightly to match perception (geometric is too generous)
+                autoMultiplier *= 0.85f;
+            }
+            else
+            {
+                // Very shallow angle - cap it
+                autoMultiplier = 2.0f;
+            }
+
+            // Clamp to reasonable range
+            autoMultiplier = Mathf.Clamp(autoMultiplier, 1.1f, 2.5f);
+
+            float centerDistance = Vector3.Distance(camPos, centerHit.Value);
+            float maxDistance = Mathf.Max(centerDistance * autoMultiplier, 10f);
+
+            // Viewport corners with small inset for numerical stability
+            float v0 = VIEWPORT_INSET;
+            float v1 = 1f - VIEWPORT_INSET;
             Vector3[] viewportCorners = new Vector3[]
             {
-                new Vector3(0, 0, 0),
-                new Vector3(1, 0, 0),
-                new Vector3(1, 1, 0),
-                new Vector3(0, 1, 0)
+                new Vector3(v0, v0, 0),  // bottom-left
+                new Vector3(v1, v0, 0),  // bottom-right
+                new Vector3(v1, v1, 0),  // top-right
+                new Vector3(v0, v1, 0)   // top-left
             };
+
+            Vector2[] corners = new Vector2[4];
+            bool allValid = true;
 
             for (int i = 0; i < 4; i++)
             {
                 Ray ray = cam.ViewportPointToRay(viewportCorners[i]);
                 Vector3? hit = RayPlaneIntersect(ray, terrainY);
+
                 if (hit.HasValue)
                 {
-                    // Convert world pos to minimap pos (relative to minimapRect origin for clipping)
-                    corners[i] = WorldToMinimapLocal(hit.Value, minimapRect);
+                    // Clamp hit point if too far from camera
+                    float hitDistance = Vector3.Distance(camPos, hit.Value);
+                    Vector3 finalHit;
+
+                    if (hitDistance > maxDistance)
+                    {
+                        // Clamp: project point at maxDistance along the ray direction
+                        Vector3 rayDir = (hit.Value - camPos).normalized;
+                        finalHit = camPos + rayDir * maxDistance;
+                        // Set Y to terrain plane
+                        finalHit.y = terrainY;
+                    }
+                    else
+                    {
+                        finalHit = hit.Value;
+                    }
+
+                    corners[i] = WorldToMinimapLocal(finalHit, minimapRect);
                 }
                 else
                 {
@@ -294,36 +358,34 @@ namespace DivineDragon.MapTools
                 }
             }
 
-            // Use clipping to restrict drawing to minimap bounds
-            GUI.BeginClip(minimapRect);
-
             if (!allValid)
             {
-                // Fallback: just show pivot as a crosshair
+                // Fallback: show pivot as crosshair
+                GUI.BeginClip(minimapRect);
                 Vector2 pivotLocal = WorldToMinimapLocal(sv.pivot, minimapRect);
                 DrawCrosshairLocal(pivotLocal, minimapRect.size);
+                GUI.EndClip();
+                return;
             }
-            else
+
+            // Convert to absolute screen coordinates and clamp to minimap bounds
+            Vector2[] absCorners = new Vector2[4];
+            for (int i = 0; i < 4; i++)
             {
-                // Draw the quadrilateral outline
-                Color frustumColor = new Color(1f, 1f, 0f, 0.9f);
-                float thickness = 2f;
-
-                // Slightly inset to better match actual viewport cropping
-                Vector2 center = (corners[0] + corners[1] + corners[2] + corners[3]) * 0.25f;
-                float insetFactor = 1f - FRUSTUM_INSET_RATIO;
-                for (int i = 0; i < 4; i++)
-                {
-                    corners[i] = center + (corners[i] - center) * insetFactor;
-                }
-
-                DrawLineLocal(corners[0], corners[1], frustumColor, thickness);
-                DrawLineLocal(corners[1], corners[2], frustumColor, thickness);
-                DrawLineLocal(corners[2], corners[3], frustumColor, thickness);
-                DrawLineLocal(corners[3], corners[0], frustumColor, thickness);
+                absCorners[i] = new Vector2(
+                    minimapRect.x + Mathf.Clamp(corners[i].x, 0, minimapRect.width),
+                    minimapRect.y + Mathf.Clamp(corners[i].y, 0, minimapRect.height)
+                );
             }
 
-            GUI.EndClip();
+            // Draw quadrilateral
+            Color frustumColor = new Color(1f, 1f, 0f, 0.9f);
+            float thickness = 2f;
+
+            DrawLineLocal(absCorners[0], absCorners[1], frustumColor, thickness);
+            DrawLineLocal(absCorners[1], absCorners[2], frustumColor, thickness);
+            DrawLineLocal(absCorners[2], absCorners[3], frustumColor, thickness);
+            DrawLineLocal(absCorners[3], absCorners[0], frustumColor, thickness);
         }
 
         private Vector3? RayPlaneIntersect(Ray ray, float planeY)
@@ -357,8 +419,8 @@ namespace DivineDragon.MapTools
             float scaleY = minimapRect.height / terrain.m_Height;
 
             // Return local coordinates (0,0 is top-left of minimapRect) matching the displayed orientation
-            float displayX = flipX ? terrain.m_Width - 1 - tileX : tileX;
-            float displayY = flipY ? tileZ : terrain.m_Height - 1 - tileZ;
+            float displayX = flipX ? terrain.m_Width - tileX : tileX;
+            float displayY = flipY ? tileZ : terrain.m_Height - tileZ;
             return new Vector2(displayX * scaleX, displayY * scaleY);
         }
 
@@ -366,14 +428,45 @@ namespace DivineDragon.MapTools
         {
             Vector2 delta = b - a;
             float length = delta.magnitude;
-            if (length < 1f) return;
+            if (length < 0.5f) return;
+            
+            CreateLineMaterial();
+            
+            Vector2 dir = delta / length;
+            Vector2 perp = new Vector2(-dir.y, dir.x) * thickness * 0.5f;
+            
+            GL.PushMatrix();
+            GL.LoadPixelMatrix();
+            lineMaterial.SetPass(0);
+            
+            GL.Begin(GL.QUADS);
+            GL.Color(color);
+            GL.Vertex3(a.x - perp.x, a.y - perp.y, 0);
+            GL.Vertex3(a.x + perp.x, a.y + perp.y, 0);
+            GL.Vertex3(b.x + perp.x, b.y + perp.y, 0);
+            GL.Vertex3(b.x - perp.x, b.y - perp.y, 0);
+            GL.End();
+            
+            GL.PopMatrix();
+        }
 
-            float angle = Mathf.Atan2(delta.y, delta.x) * Mathf.Rad2Deg;
+        private static void CreateLineMaterial()
+        {
+            if (lineMaterial != null) return;
+            
+            Shader shader = Shader.Find("Hidden/Internal-Colored");
+            lineMaterial = new Material(shader);
+            lineMaterial.hideFlags = HideFlags.HideAndDontSave;
+            lineMaterial.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
+            lineMaterial.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
+            lineMaterial.SetInt("_Cull", (int)UnityEngine.Rendering.CullMode.Off);
+            lineMaterial.SetInt("_ZWrite", 0);
+        }
 
-            Matrix4x4 matrixBackup = GUI.matrix;
-            GUIUtility.RotateAroundPivot(angle, a);
-            EditorGUI.DrawRect(new Rect(a.x, a.y - thickness / 2f, length, thickness), color);
-            GUI.matrix = matrixBackup;
+        private void DrawCornerDotLocal(Vector2 center, Color color, float size)
+        {
+            float half = size * 0.5f;
+            EditorGUI.DrawRect(new Rect(center.x - half, center.y - half, size, size), color);
         }
 
         private void DrawCrosshairLocal(Vector2 center, Vector2 boundsSize)
@@ -398,6 +491,11 @@ namespace DivineDragon.MapTools
             float xMax = Mathf.Min(rect.xMax, bounds.xMax);
             float yMax = Mathf.Min(rect.yMax, bounds.yMax);
             return new Rect(x, y, Mathf.Max(0, xMax - x), Mathf.Max(0, yMax - y));
+        }
+
+        private Vector2 ClampPointToRect(Vector2 p, float width, float height)
+        {
+            return new Vector2(Mathf.Clamp(p.x, 0f, width), Mathf.Clamp(p.y, 0f, height));
         }
 
         private void HandleMinimapInput(Rect minimapRect)
