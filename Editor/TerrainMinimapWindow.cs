@@ -1,5 +1,3 @@
-using System;
-using System.IO;
 using UnityEditor;
 using UnityEngine;
 
@@ -28,16 +26,12 @@ namespace DivineDragon.MapTools
         // UI state
         private bool flipX = true; // default to match scene orientation
         private bool flipY = true; // default to match scene orientation
-        private Rect minimapDrawRect;
         private Vector2Int hoveredTile = new Vector2Int(-1, -1);
         private string hoveredTerrainTid;
         private string hoveredTerrainName;
         private bool isDraggingMinimap;
         private Vector2 lastDragTile = new Vector2(float.MinValue, float.MinValue);
         private bool naturalScroll = false;
-
-        // Reference map browsing
-        private string referenceMapPath;
 
         private const string PREFS_NATURAL_SCROLL = "TerrainMinimap_NaturalScroll";
 
@@ -239,8 +233,6 @@ namespace DivineDragon.MapTools
                 float xOffset = (available.width - width) / 2f;
                 drawRect = new Rect(available.x + xOffset, available.y, width, available.height);
             }
-
-            minimapDrawRect = drawRect;
 
             // Draw background
             EditorGUI.DrawRect(drawRect, new Color(0.15f, 0.15f, 0.15f, 1f));
@@ -463,12 +455,6 @@ namespace DivineDragon.MapTools
             lineMaterial.SetInt("_ZWrite", 0);
         }
 
-        private void DrawCornerDotLocal(Vector2 center, Color color, float size)
-        {
-            float half = size * 0.5f;
-            EditorGUI.DrawRect(new Rect(center.x - half, center.y - half, size, size), color);
-        }
-
         private void DrawCrosshairLocal(Vector2 center, Vector2 boundsSize)
         {
             if (center.x < 0 || center.y < 0 || center.x > boundsSize.x || center.y > boundsSize.y)
@@ -482,20 +468,6 @@ namespace DivineDragon.MapTools
             EditorGUI.DrawRect(new Rect(center.x - size, center.y - thickness / 2f, size * 2, thickness), color);
             // Vertical
             EditorGUI.DrawRect(new Rect(center.x - thickness / 2f, center.y - size, thickness, size * 2), color);
-        }
-
-        private Rect ClampRect(Rect rect, Rect bounds)
-        {
-            float x = Mathf.Max(rect.x, bounds.x);
-            float y = Mathf.Max(rect.y, bounds.y);
-            float xMax = Mathf.Min(rect.xMax, bounds.xMax);
-            float yMax = Mathf.Min(rect.yMax, bounds.yMax);
-            return new Rect(x, y, Mathf.Max(0, xMax - x), Mathf.Max(0, yMax - y));
-        }
-
-        private Vector2 ClampPointToRect(Vector2 p, float width, float height)
-        {
-            return new Vector2(Mathf.Clamp(p.x, 0f, width), Mathf.Clamp(p.y, 0f, height));
         }
 
         private void HandleMinimapInput(Rect minimapRect)
@@ -775,7 +747,6 @@ namespace DivineDragon.MapTools
             if (loadedTerrain != null)
             {
                 terrain = loadedTerrain;
-                referenceMapPath = path;
                 textureDirty = true;
                 isCurrentMapMode = false;
                 UpdateWindowTitle();
