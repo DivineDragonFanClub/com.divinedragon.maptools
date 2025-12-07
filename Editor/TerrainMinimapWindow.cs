@@ -16,6 +16,7 @@ namespace DivineDragon.MapTools
 
         // State
         private TerrainAssetAdapter terrain;
+        private TerrainAssetAdapter referenceTerrain;  // Remembered reference map
         private TerrainVirtualGrid virtualGrid;
         private bool isCurrentMapMode = true;
         private Texture2D minimapTexture;
@@ -24,8 +25,8 @@ namespace DivineDragon.MapTools
         private int lastTextureHeight;
 
         // UI state
-        private bool flipX = true; // default to match scene orientation
-        private bool flipY = true; // default to match scene orientation
+        private bool flipX = false; // default to match scene orientation
+        private bool flipY = false; // default to match scene orientation
         private Vector2Int hoveredTile = new Vector2Int(-1, -1);
         private string hoveredTerrainTid;
         private string hoveredTerrainName;
@@ -35,7 +36,7 @@ namespace DivineDragon.MapTools
 
         private const string PREFS_NATURAL_SCROLL = "TerrainMinimap_NaturalScroll";
 
-        [MenuItem("Window/Divine Dragon/Terrain Minimap")]
+        [MenuItem("Map Tools/Terrain Minimap")]
         public static void ShowWindow()
         {
             // Create a new instance each time (allows multiple windows)
@@ -53,6 +54,10 @@ namespace DivineDragon.MapTools
             var window = CreateInstance<TerrainMinimapWindow>();
             window.terrain = terrain;
             window.isCurrentMapMode = !asReference;
+            if (asReference)
+            {
+                window.referenceTerrain = terrain;  // Remember for toggling
+            }
             window.textureDirty = true;
             window.UpdateWindowTitle();
             window.minSize = new Vector2(200, 200);
@@ -66,6 +71,12 @@ namespace DivineDragon.MapTools
             EditorApplication.update += OnEditorUpdate;
             TerrainPaintToolWindow.OnTerrainDataChanged += OnTerrainDataChanged;
             naturalScroll = EditorPrefs.GetBool(PREFS_NATURAL_SCROLL, false);
+
+            // Auto-sync with paint tool on enable (handles recompile/reopen)
+            if (isCurrentMapMode)
+            {
+                SyncWithPaintTool();
+            }
         }
 
         private void OnDisable()
@@ -115,17 +126,22 @@ namespace DivineDragon.MapTools
         {
             EditorGUILayout.BeginHorizontal(EditorStyles.toolbar);
 
-            // Mode toggle
-            EditorGUI.BeginChangeCheck();
-            bool newCurrentMode = GUILayout.Toggle(isCurrentMapMode, "Current Map", EditorStyles.toolbarButton, GUILayout.Width(85));
-            bool newRefMode = GUILayout.Toggle(!isCurrentMapMode, "Reference", EditorStyles.toolbarButton, GUILayout.Width(70));
-
-            if (newCurrentMode != isCurrentMapMode || newRefMode == isCurrentMapMode)
+            // Mode toggle using toolbar for proper mutual exclusion
+            int mode = isCurrentMapMode ? 0 : 1;
+            int newMode = GUILayout.Toolbar(mode, new[] { "Current Map", "Reference" }, EditorStyles.toolbarButton, GUILayout.Width(160));
+            if (newMode != mode)
             {
-                isCurrentMapMode = newCurrentMode || !newRefMode;
+                isCurrentMapMode = (newMode == 0);
                 if (isCurrentMapMode)
                 {
+                    // Switching to Current Map - restore from paint tool
                     SyncWithPaintTool();
+                }
+                else
+                {
+                    // Switching to Reference - show remembered reference or clear
+                    terrain = referenceTerrain;  // Will be null if none selected yet
+                    textureDirty = true;
                 }
                 UpdateWindowTitle();
             }
@@ -145,6 +161,11 @@ namespace DivineDragon.MapTools
                 {
                     SyncWithPaintTool();
                 }
+            }
+
+            if (GUILayout.Button(new GUIContent("+", "Open new minimap window with same settings"), EditorStyles.toolbarButton, GUILayout.Width(22)))
+            {
+                CloneWindow();
             }
 
             GUILayout.Space(6);
@@ -633,9 +654,9 @@ namespace DivineDragon.MapTools
 
             if (hoveredTile.x >= 0 && terrain != null)
             {
-                string displayName = !string.IsNullOrEmpty(hoveredTerrainName)
-                    ? $"{hoveredTerrainName} ({hoveredTerrainTid})"
-                    : hoveredTerrainTid ?? "Empty";
+                string displayName = !string.IsNullOrEmpty(hoveredTerrainTid)
+                    ? TerrainDefinitions.GetDisplayString(hoveredTerrainTid)
+                    : "Empty";
                 EditorGUILayout.LabelField($"({hoveredTile.x}, {hoveredTile.y}): {displayName}", EditorStyles.miniLabel);
             }
             else
@@ -732,29 +753,38 @@ namespace DivineDragon.MapTools
             titleContent = new GUIContent($"{prefix}: {mapName}");
         }
 
+        private void CloneWindow()
+        {
+            var window = CreateInstance<TerrainMinimapWindow>();
+            window.terrain = terrain;
+            window.referenceTerrain = referenceTerrain;
+            window.isCurrentMapMode = isCurrentMapMode;
+            window.flipX = flipX;
+            window.flipY = flipY;
+            window.naturalScroll = naturalScroll;
+            window.textureDirty = true;
+            window.UpdateWindowTitle();
+            window.minSize = new Vector2(200, 200);
+            window.Show();
+        }
+
         private void BrowseForMap()
         {
-            string path = EditorUtility.OpenFilePanel("Select Terrain Asset", "Assets", "asset");
-            if (string.IsNullOrEmpty(path)) return;
+            // Exclude current map from picker (don't want to reference yourself)
+            var currentMapTerrain = TerrainPaintToolWindow.SelectedTerrain;
 
-            // Convert to project-relative path
-            if (path.StartsWith(Application.dataPath))
+            TerrainPickerWindow.Show(selected =>
             {
-                path = "Assets" + path.Substring(Application.dataPath.Length);
-            }
-
-            var loadedTerrain = TerrainAssetAdapter.Load(path);
-            if (loadedTerrain != null)
-            {
-                terrain = loadedTerrain;
-                textureDirty = true;
-                isCurrentMapMode = false;
-                UpdateWindowTitle();
-            }
-            else
-            {
-                EditorUtility.DisplayDialog("Error", "Failed to load terrain asset.", "OK");
-            }
+                if (selected != null)
+                {
+                    terrain = selected;
+                    referenceTerrain = selected;  // Remember for toggling
+                    textureDirty = true;
+                    isCurrentMapMode = false;
+                    UpdateWindowTitle();
+                    Repaint();
+                }
+            }, exclude: currentMapTerrain);
         }
 
         /// <summary>
