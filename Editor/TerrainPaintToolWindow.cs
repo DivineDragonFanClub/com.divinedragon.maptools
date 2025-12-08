@@ -1104,27 +1104,6 @@ namespace DivineDragon.MapTools
                 textDisplayMode = (TextDisplayMode)EditorGUILayout.EnumPopup("Display", textDisplayMode);
                 textSize = EditorGUILayout.Slider("Text Size", textSize, 0.1f, 3f);
 
-                EditorGUILayout.Space(5);
-                EditorGUILayout.LabelField("Localization", EditorStyles.miniBoldLabel);
-                string[] availableLanguages = TerrainLocalizer.AvailableLanguages;
-                if (availableLanguages.Length > 0)
-                {
-                    int currentLangIndex = System.Array.IndexOf(availableLanguages, TerrainLocalizer.CurrentLanguage);
-                    if (currentLangIndex < 0) currentLangIndex = 0;
-                    int newLangIndex = EditorGUILayout.Popup("Language", currentLangIndex, availableLanguages);
-                    if (newLangIndex != currentLangIndex && newLangIndex >= 0 && newLangIndex < availableLanguages.Length)
-                    {
-                        TerrainLocalizer.SetLanguage(availableLanguages[newLangIndex]);
-                        SceneView.RepaintAll();
-                    }
-                }
-                else
-                {
-                    EditorGUILayout.HelpBox(
-                        "No localization files found. Extract GameData.txt to Assets/Share/Addressables/Message/{lang}_scripts/",
-                        MessageType.Info);
-                }
-
                 if (EditorGUI.EndChangeCheck())
                 {
                     SaveSettings();

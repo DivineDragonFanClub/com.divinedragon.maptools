@@ -48,6 +48,19 @@ namespace DivineDragon.MapTools
         private void OnEnable()
         {
             RefreshChapterLocation();
+            TerrainLocalizer.OnLanguageChanged += OnLanguageChanged;
+        }
+
+        private void OnDisable()
+        {
+            TerrainLocalizer.OnLanguageChanged -= OnLanguageChanged;
+        }
+
+        private void OnLanguageChanged()
+        {
+            // Reload chapter data to update localized titles
+            LoadChapterData();
+            Repaint();
         }
 
         private void OnGUI()
@@ -423,10 +436,11 @@ namespace DivineDragon.MapTools
 
                 foreach (XElement param in dataNode.Elements("Param"))
                 {
+                    string cid = (string)param.Attribute("Cid");
                     ChapterRecord record = new ChapterRecord
                     {
-                        Cid = (string)param.Attribute("Cid"),
-                        Title = (string)param.Attribute("Help"),
+                        Cid = cid,
+                        Title = GetLocalizedChapterTitle(cid) ?? (string)param.Attribute("Help"),
                         RawField = (string)param.Attribute("Field"),
                         RawTerrain = (string)param.Attribute("Terrain")
                     };
@@ -536,6 +550,46 @@ namespace DivineDragon.MapTools
             string assetsPath = Application.dataPath;
             string projectRoot = Path.GetDirectoryName(assetsPath);
             return string.IsNullOrEmpty(projectRoot) ? assetsPath : projectRoot.Replace("\\", "/");
+        }
+
+        /// <summary>
+        /// Convert CID to MCID and look up localized chapter title.
+        /// Returns "PREFIX: TITLE" (e.g., "Chapter 1: Awake at Last") or null if not found.
+        /// </summary>
+        private static string GetLocalizedChapterTitle(string cid)
+        {
+            if (string.IsNullOrEmpty(cid))
+            {
+                return null;
+            }
+
+            // Convert CID_M001 to MCID_M001
+            string mcidBase = cid.StartsWith("CID_", StringComparison.OrdinalIgnoreCase)
+                ? "MCID_" + cid.Substring(4)
+                : "MCID_" + cid;
+
+            // Look up prefix (e.g., "Chapter 1") and title (e.g., "Awake at Last")
+            string prefix = TerrainLocalizer.GetLocalizedName(mcidBase + "_PREFIX");
+            string title = TerrainLocalizer.GetLocalizedName(mcidBase);
+
+            // If we got back the key itself, localization wasn't found
+            bool hasPrefix = !string.IsNullOrEmpty(prefix) && prefix != mcidBase + "_PREFIX";
+            bool hasTitle = !string.IsNullOrEmpty(title) && title != mcidBase;
+
+            if (hasPrefix && hasTitle)
+            {
+                return $"{prefix}: {title}";
+            }
+            if (hasTitle)
+            {
+                return title;
+            }
+            if (hasPrefix)
+            {
+                return prefix;
+            }
+
+            return null;
         }
 
         private class ChapterRecord

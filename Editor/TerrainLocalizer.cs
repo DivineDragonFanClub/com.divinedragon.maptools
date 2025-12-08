@@ -22,6 +22,11 @@ namespace DivineDragon.MapTools
         private static bool hasWarned;
 
         /// <summary>
+        /// Event fired when the language is changed. Subscribe to refresh cached localized data.
+        /// </summary>
+        public static event Action OnLanguageChanged;
+
+        /// <summary>
         /// Available language codes detected from *_scripts folders.
         /// </summary>
         public static string[] AvailableLanguages
@@ -103,6 +108,7 @@ namespace DivineDragon.MapTools
             currentLanguage = lang;
             EditorPrefs.SetString(PREFS_LANGUAGE, lang);
             InvalidateCache();
+            OnLanguageChanged?.Invoke();
         }
 
         /// <summary>
