@@ -264,7 +264,7 @@ namespace DivineDragon.MapTools
                 {
                     string tid = virtualGrid.GetTerrainId(x, y);
                     Color color;
-                    if (string.IsNullOrEmpty(tid) || tid == "YOURNO0123" || tid == "YOURNO0000")
+                    if (string.IsNullOrEmpty(tid) || TerrainVirtualGridCache.IsEmptyTerrain(tid))
                     {
                         color = new Color(0.2f, 0.2f, 0.2f, 1f);
                     }

@@ -2884,6 +2884,15 @@ namespace DivineDragon.MapTools
             }
         }
         
+        /// <summary>
+        /// Gets the cached islands for a terrain. Used by minimap for island grid overlay.
+        /// </summary>
+        internal static List<TerrainIsland> GetIslandsForTerrain(TerrainAssetAdapter terrain)
+        {
+            if (terrain == null) return null;
+            return GetOrCreateIslands(terrain, 100f); // Default distance for minimap
+        }
+
         private static List<TerrainIsland> GetOrCreateIslands(TerrainAssetAdapter terrain, float cameraDistance)
         {
             // Check if terrain changed or we need to rebuild

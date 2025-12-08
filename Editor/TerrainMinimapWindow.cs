@@ -5,6 +5,8 @@ namespace DivineDragon.MapTools
 {
     public class TerrainMinimapWindow : EditorWindow
     {
+        private enum MinimapGridMode { None, Simple, Island }
+
         // Keep in sync with TerrainPaintToolWindow.TILE_SIZE (world units per tile)
         private const float TILE_SIZE = 5f;
         private const float MIN_CAMERA_DISTANCE = 1f;
@@ -33,8 +35,10 @@ namespace DivineDragon.MapTools
         private bool isDraggingMinimap;
         private Vector2 lastDragTile = new Vector2(float.MinValue, float.MinValue);
         private bool naturalScroll = false;
+        private MinimapGridMode gridMode = MinimapGridMode.None;
 
         private const string PREFS_NATURAL_SCROLL = "TerrainMinimap_NaturalScroll";
+        private const string PREFS_GRID_MODE = "TerrainMinimap_GridMode";
 
         [MenuItem("Map Tools/Terrain Minimap")]
         public static void ShowWindow()
@@ -72,6 +76,7 @@ namespace DivineDragon.MapTools
             TerrainPaintToolWindow.OnTerrainDataChanged += OnTerrainDataChanged;
             TerrainPaintToolWindow.OnTerrainSelectionChanged += OnTerrainSelectionChanged;
             naturalScroll = EditorPrefs.GetBool(PREFS_NATURAL_SCROLL, false);
+            gridMode = (MinimapGridMode)EditorPrefs.GetInt(PREFS_GRID_MODE, 0);
 
             // Auto-sync with paint tool on enable (handles recompile/reopen)
             if (isCurrentMapMode)
@@ -187,6 +192,16 @@ namespace DivineDragon.MapTools
                 EditorPrefs.SetBool(PREFS_NATURAL_SCROLL, naturalScroll);
             }
 
+            // Grid mode dropdown
+            string[] gridModeNames = { "No Grid", "Grid", "Islands" };
+            int newGridMode = EditorGUILayout.Popup((int)gridMode, gridModeNames, EditorStyles.toolbarPopup, GUILayout.Width(70));
+            if (newGridMode != (int)gridMode)
+            {
+                gridMode = (MinimapGridMode)newGridMode;
+                EditorPrefs.SetInt(PREFS_GRID_MODE, newGridMode);
+                Repaint();
+            }
+
             EditorGUILayout.EndHorizontal();
         }
 
@@ -271,6 +286,12 @@ namespace DivineDragon.MapTools
 
             // Draw minimap texture
             GUI.DrawTexture(drawRect, minimapTexture, ScaleMode.StretchToFill);
+
+            // Draw grid overlay
+            if (gridMode != MinimapGridMode.None)
+            {
+                DrawGridOverlay(drawRect);
+            }
 
             // Draw view frustum if current map mode
             if (isCurrentMapMode)
@@ -502,6 +523,128 @@ namespace DivineDragon.MapTools
             EditorGUI.DrawRect(new Rect(center.x - thickness / 2f, center.y - size, thickness, size * 2), color);
         }
 
+        private void DrawGridOverlay(Rect minimapRect)
+        {
+            if (terrain == null) return;
+
+            switch (gridMode)
+            {
+                case MinimapGridMode.Simple:
+                    DrawSimpleGrid(minimapRect);
+                    break;
+                case MinimapGridMode.Island:
+                    DrawIslandGrid(minimapRect);
+                    break;
+            }
+        }
+
+        private void DrawSimpleGrid(Rect minimapRect)
+        {
+            if (terrain == null) return;
+
+            // Two-pass drawing: dark outline then light line for visibility on any background
+            Color darkColor = new Color(0f, 0f, 0f, 0.25f);
+            Color lightColor = new Color(1f, 1f, 1f, 0.3f);
+            float cellWidth = minimapRect.width / terrain.m_Width;
+            float cellHeight = minimapRect.height / terrain.m_Height;
+
+            // Vertical lines
+            for (int x = 1; x < terrain.m_Width; x++)
+            {
+                float xPos = minimapRect.x + x * cellWidth;
+                Vector2 top = new Vector2(xPos, minimapRect.y);
+                Vector2 bottom = new Vector2(xPos, minimapRect.yMax);
+                DrawLineLocal(top, bottom, darkColor, 2f);
+                DrawLineLocal(top, bottom, lightColor, 1f);
+            }
+
+            // Horizontal lines
+            for (int y = 1; y < terrain.m_Height; y++)
+            {
+                float yPos = minimapRect.y + y * cellHeight;
+                Vector2 left = new Vector2(minimapRect.x, yPos);
+                Vector2 right = new Vector2(minimapRect.xMax, yPos);
+                DrawLineLocal(left, right, darkColor, 2f);
+                DrawLineLocal(left, right, lightColor, 1f);
+            }
+        }
+
+        private void DrawIslandGrid(Rect minimapRect)
+        {
+            if (terrain == null || virtualGrid == null) return;
+
+            // Get islands from paint tool (shared cache)
+            var islands = TerrainPaintToolWindow.GetIslandsForTerrain(terrain);
+            if (islands == null || islands.Count == 0) return;
+
+            float cellWidth = minimapRect.width / terrain.m_Width;
+            float cellHeight = minimapRect.height / terrain.m_Height;
+
+            foreach (var island in islands)
+            {
+                // Skip empty terrain islands
+                if (TerrainVirtualGridCache.IsEmptyTerrain(island.terrainId))
+                    continue;
+
+                Color borderColor = GetIslandBorderColor(island.terrainId);
+                var tileSet = island.TileSet;
+
+                foreach (var tile in island.tiles)
+                {
+                    // Convert to display coordinates (apply flip)
+                    int displayX = flipX ? terrain.m_Width - 1 - tile.x : tile.x;
+                    int displayY = flipY ? tile.y : terrain.m_Height - 1 - tile.y;
+
+                    float left = minimapRect.x + displayX * cellWidth;
+                    float top = minimapRect.y + displayY * cellHeight;
+                    float right = left + cellWidth;
+                    float bottom = top + cellHeight;
+
+                    // Check each edge - draw if neighbor not in same island
+                    // The edge positions need to account for flip
+
+                    // Top edge (in world space: y+1)
+                    Vector2Int neighborUp = new Vector2Int(tile.x, tile.y + 1);
+                    if (!tileSet.Contains(neighborUp))
+                    {
+                        float edgeY = flipY ? bottom : top;
+                        DrawLineLocal(new Vector2(left, edgeY), new Vector2(right, edgeY), borderColor, 1f);
+                    }
+
+                    // Bottom edge (in world space: y-1)
+                    Vector2Int neighborDown = new Vector2Int(tile.x, tile.y - 1);
+                    if (!tileSet.Contains(neighborDown))
+                    {
+                        float edgeY = flipY ? top : bottom;
+                        DrawLineLocal(new Vector2(left, edgeY), new Vector2(right, edgeY), borderColor, 1f);
+                    }
+
+                    // Right edge (in world space: x+1)
+                    Vector2Int neighborRight = new Vector2Int(tile.x + 1, tile.y);
+                    if (!tileSet.Contains(neighborRight))
+                    {
+                        float edgeX = flipX ? left : right;
+                        DrawLineLocal(new Vector2(edgeX, top), new Vector2(edgeX, bottom), borderColor, 1f);
+                    }
+
+                    // Left edge (in world space: x-1)
+                    Vector2Int neighborLeft = new Vector2Int(tile.x - 1, tile.y);
+                    if (!tileSet.Contains(neighborLeft))
+                    {
+                        float edgeX = flipX ? right : left;
+                        DrawLineLocal(new Vector2(edgeX, top), new Vector2(edgeX, bottom), borderColor, 1f);
+                    }
+                }
+            }
+        }
+
+        private static Color GetIslandBorderColor(string terrainId)
+        {
+            Color color = TerrainDefinitions.GetColorOrFallback(terrainId);
+            // Darken to 60% like main view
+            return new Color(color.r * 0.6f, color.g * 0.6f, color.b * 0.6f, 0.8f);
+        }
+
         private void HandleMinimapInput(Rect minimapRect)
         {
             Event e = Event.current;
@@ -703,7 +846,7 @@ namespace DivineDragon.MapTools
                 {
                     string tid = virtualGrid.GetTerrainId(x, y);
                     Color color;
-                    if (string.IsNullOrEmpty(tid) || tid == "YOURNO0123" || tid == "YOURNO0000")
+                    if (string.IsNullOrEmpty(tid) || TerrainVirtualGridCache.IsEmptyTerrain(tid))
                     {
                         color = new Color(0.2f, 0.2f, 0.2f, 1f); // Empty/no-entry
                     }
@@ -763,6 +906,7 @@ namespace DivineDragon.MapTools
             window.flipX = flipX;
             window.flipY = flipY;
             window.naturalScroll = naturalScroll;
+            window.gridMode = gridMode;
             window.textureDirty = true;
             window.UpdateWindowTitle();
             window.minSize = new Vector2(200, 200);
