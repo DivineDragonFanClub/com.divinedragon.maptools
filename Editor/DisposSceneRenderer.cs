@@ -51,25 +51,21 @@ namespace DivineDragon.MapTools
             float baseX = TerrainStartX + tileX * TILE_SIZE;
             float baseZ = TerrainStartZ + tileZ * TILE_SIZE;
 
+            // Flat tile: all corners use the same height
+            float y;
             if (currentTerrain == null)
             {
-                float y = worldOffset.y + lift;
-                bl = new Vector3(baseX, y, baseZ);
-                br = new Vector3(baseX + TILE_SIZE, y, baseZ);
-                tr = new Vector3(baseX + TILE_SIZE, y, baseZ + TILE_SIZE);
-                tl = new Vector3(baseX, y, baseZ + TILE_SIZE);
-                return;
+                y = worldOffset.y + lift;
+            }
+            else
+            {
+                y = TerrainPaintToolWindow.GetTileWorldHeight(currentTerrain, tileX, tileZ) + lift;
             }
 
-            float h00 = TerrainPaintToolWindow.GetTileCornerWorldHeight(currentTerrain, tileX, tileZ) + lift;
-            float h10 = TerrainPaintToolWindow.GetTileCornerWorldHeight(currentTerrain, tileX + 1, tileZ) + lift;
-            float h11 = TerrainPaintToolWindow.GetTileCornerWorldHeight(currentTerrain, tileX + 1, tileZ + 1) + lift;
-            float h01 = TerrainPaintToolWindow.GetTileCornerWorldHeight(currentTerrain, tileX, tileZ + 1) + lift;
-
-            bl = new Vector3(baseX, h00, baseZ);
-            br = new Vector3(baseX + TILE_SIZE, h10, baseZ);
-            tr = new Vector3(baseX + TILE_SIZE, h11, baseZ + TILE_SIZE);
-            tl = new Vector3(baseX, h01, baseZ + TILE_SIZE);
+            bl = new Vector3(baseX, y, baseZ);
+            br = new Vector3(baseX + TILE_SIZE, y, baseZ);
+            tr = new Vector3(baseX + TILE_SIZE, y, baseZ + TILE_SIZE);
+            tl = new Vector3(baseX, y, baseZ + TILE_SIZE);
         }
 
         private Vector3 GetTileCenterWorld(int tileX, int tileZ, float lift = 0f)
@@ -372,6 +368,7 @@ namespace DivineDragon.MapTools
             {
                 float lift = 0.01f;
 
+                // Draw horizontal grid lines - each segment uses the tile's center height (flat tiles)
                 for (int row = 0; row <= height; row++)
                 {
                     float z = startZ + row * TILE_SIZE;
@@ -379,14 +376,16 @@ namespace DivineDragon.MapTools
                     {
                         float x0 = startX + col * TILE_SIZE;
                         float x1 = startX + (col + 1) * TILE_SIZE;
-                        float hStart = TerrainPaintToolWindow.GetTileCornerWorldHeight(currentTerrain, col, row) + lift;
-                        float hEnd = TerrainPaintToolWindow.GetTileCornerWorldHeight(currentTerrain, col + 1, row) + lift;
-                        Vector3 start = new Vector3(x0, hStart, z);
-                        Vector3 end = new Vector3(x1, hEnd, z);
+                        // Use tile center height for flat tile appearance
+                        int tileRow = Mathf.Clamp(row, 0, height - 1);
+                        float tileHeight = TerrainPaintToolWindow.GetTileWorldHeight(currentTerrain, col, tileRow) + lift;
+                        Vector3 start = new Vector3(x0, tileHeight, z);
+                        Vector3 end = new Vector3(x1, tileHeight, z);
                         Handles.DrawLine(start, end, 1f);
                     }
                 }
 
+                // Draw vertical grid lines - each segment uses the tile's center height (flat tiles)
                 for (int col = 0; col <= width; col++)
                 {
                     float x = startX + col * TILE_SIZE;
@@ -394,10 +393,11 @@ namespace DivineDragon.MapTools
                     {
                         float z0 = startZ + row * TILE_SIZE;
                         float z1 = startZ + (row + 1) * TILE_SIZE;
-                        float hStart = TerrainPaintToolWindow.GetTileCornerWorldHeight(currentTerrain, col, row) + lift;
-                        float hEnd = TerrainPaintToolWindow.GetTileCornerWorldHeight(currentTerrain, col, row + 1) + lift;
-                        Vector3 start = new Vector3(x, hStart, z0);
-                        Vector3 end = new Vector3(x, hEnd, z1);
+                        // Use tile center height for flat tile appearance
+                        int tileCol = Mathf.Clamp(col, 0, width - 1);
+                        float tileHeight = TerrainPaintToolWindow.GetTileWorldHeight(currentTerrain, tileCol, row) + lift;
+                        Vector3 start = new Vector3(x, tileHeight, z0);
+                        Vector3 end = new Vector3(x, tileHeight, z1);
                         Handles.DrawLine(start, end, 1f);
                     }
                 }

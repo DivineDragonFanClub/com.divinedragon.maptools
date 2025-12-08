@@ -33,9 +33,7 @@ namespace DivineDragon.MapTools
             public float offsetZ;
             public string sceneKey;
             public float[] centerSamples;
-            public float[] cornerSamples;
             public bool anyCenterHits;
-            public bool anyCornerHits;
             public bool autoSelection;
             public string colliderPath;
             public string requestedColliderPath;
@@ -335,7 +333,7 @@ namespace DivineDragon.MapTools
                 return false;
             }
 
-            if (cache == null || cache.centerSamples == null || cache.cornerSamples == null)
+            if (cache == null || cache.centerSamples == null)
             {
                 return false;
             }
@@ -379,11 +377,6 @@ namespace DivineDragon.MapTools
             }
 
             if (cache.centerSamples.Length != cache.width * cache.height)
-            {
-                return false;
-            }
-
-            if (cache.cornerSamples.Length != (cache.width + 1) * (cache.height + 1))
             {
                 return false;
             }
@@ -442,13 +435,6 @@ namespace DivineDragon.MapTools
                 cache.centerSamples[i] = float.NaN;
             }
 
-            int cornerCount = (cache.width + 1) * (cache.height + 1);
-            cache.cornerSamples = new float[cornerCount];
-            for (int i = 0; i < cornerCount; i++)
-            {
-                cache.cornerSamples[i] = float.NaN;
-            }
-
             Scene activeScene = SceneManager.GetActiveScene();
             string usedColliderPath;
             MeshCollider collider = GetSceneMeshCollider(activeScene, settings, terrain, true, out usedColliderPath);
@@ -470,22 +456,7 @@ namespace DivineDragon.MapTools
             float startZ = terrain.m_Z + worldOffset.z;
             float halfTile = TILE_SIZE * 0.5f;
 
-            for (int row = 0; row <= cache.height; row++)
-            {
-                for (int col = 0; col <= cache.width; col++)
-                {
-                    int cornerIndex = row * (cache.width + 1) + col;
-                    float cornerX = startX + col * TILE_SIZE;
-                    float cornerZ = startZ + row * TILE_SIZE;
-
-                    if (TrySampleHeight(collider, topY, bottomY, maxDistance, cornerX, cornerZ, out float cornerHeight))
-                    {
-                        cache.cornerSamples[cornerIndex] = cornerHeight;
-                        cache.anyCornerHits = true;
-                    }
-                }
-            }
-
+            // Only sample at tile centers - each tile is flat at its center height
             for (int row = 0; row < cache.height; row++)
             {
                 for (int col = 0; col < cache.width; col++)
@@ -502,9 +473,8 @@ namespace DivineDragon.MapTools
                 }
             }
 
-            bool anyHits = cache.anyCenterHits || cache.anyCornerHits;
             string logKey = BuildRaycastLogKey(terrain, cache.sceneKey, cache.colliderPath);
-            if (anyHits)
+            if (cache.anyCenterHits)
             {
                 loggedRaycastFailures.Remove(logKey);
             }
@@ -562,32 +532,12 @@ namespace DivineDragon.MapTools
 
         private static float ResolveCornerHeight(TerrainHeightCache cache, TerrainHeightSettings settings, int col, int row)
         {
-            if (settings == null)
-            {
-                return worldOffset.y;
-            }
-
-            if (cache != null && cache.cornerSamples != null && cache.width >= 0 && cache.height >= 0)
-            {
-                int maxCol = cache.width;
-                int maxRow = cache.height;
-                if (col >= 0 && col <= maxCol && row >= 0 && row <= maxRow)
-                {
-                    int index = row * (maxCol + 1) + col;
-                    if (index >= 0 && index < cache.cornerSamples.Length)
-                    {
-                        float sample = cache.cornerSamples[index];
-                        if (!float.IsNaN(sample))
-                        {
-                            return sample + settings.offset;
-                        }
-                    }
-                }
-            }
-
-            int fallbackCol = cache != null ? Mathf.Clamp(col, 0, Mathf.Max(cache.width - 1, 0)) : 0;
-            int fallbackRow = cache != null ? Mathf.Clamp(row, 0, Mathf.Max(cache.height - 1, 0)) : 0;
-            return ResolveTileHeight(cache, settings, fallbackCol, fallbackRow);
+            // For flat tiles: all 4 corners of a tile use the same center height.
+            // Corner (col, row) is the bottom-left corner of tile (col, row).
+            // Clamp to valid tile indices.
+            int tileCol = cache != null ? Mathf.Clamp(col, 0, Mathf.Max(cache.width - 1, 0)) : 0;
+            int tileRow = cache != null ? Mathf.Clamp(row, 0, Mathf.Max(cache.height - 1, 0)) : 0;
+            return ResolveTileHeight(cache, settings, tileCol, tileRow);
         }
 
         private static void FillTileQuad(Vector3[] buffer, float startX, float startZ, int col, int row, TerrainHeightCache cache, TerrainHeightSettings settings, float fallbackY, float yOffset = 0f)
@@ -597,11 +547,9 @@ namespace DivineDragon.MapTools
 
             if (settings != null && settings.mode == TerrainHeightMode.RaycastMesh && cache != null)
             {
-                float h00 = ResolveCornerHeight(cache, settings, col, row) + yOffset;
-                float h10 = ResolveCornerHeight(cache, settings, col + 1, row) + yOffset;
-                float h11 = ResolveCornerHeight(cache, settings, col + 1, row + 1) + yOffset;
-                float h01 = ResolveCornerHeight(cache, settings, col, row + 1) + yOffset;
-                FillQuadWithCornerHeights(buffer, baseX, baseZ, TILE_SIZE, h00, h10, h11, h01);
+                // Flat tile: single height for all 4 corners
+                float tileHeight = ResolveTileHeight(cache, settings, col, row) + yOffset;
+                FillQuad(buffer, baseX, baseZ, tileHeight, TILE_SIZE, 0f);
                 return;
             }
 

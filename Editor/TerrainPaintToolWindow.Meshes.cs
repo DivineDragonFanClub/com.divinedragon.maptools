@@ -289,6 +289,7 @@ namespace DivineDragon.MapTools
             int indexOffset = 0;
             Color vertexColor = gridColor;
 
+            // Horizontal grid lines - each segment is flat at the tile's center height
             for (int row = 0; row <= height; row++)
             {
                 float z = startZ + row * TILE_SIZE;
@@ -296,14 +297,16 @@ namespace DivineDragon.MapTools
                 {
                     float x0 = startX + col * TILE_SIZE;
                     float x1 = startX + (col + 1) * TILE_SIZE;
-                    float hStart = ResolveCornerHeight(cache, settings, col, row) + lift;
-                    float hEnd = ResolveCornerHeight(cache, settings, col + 1, row) + lift;
-                    Vector3 start = new Vector3(x0, hStart, z);
-                    Vector3 end = new Vector3(x1, hEnd, z);
+                    // Use tile center height for flat horizontal line
+                    int tileRow = Mathf.Clamp(row, 0, height - 1);
+                    float tileHeight = ResolveTileHeight(cache, settings, col, tileRow) + lift;
+                    Vector3 start = new Vector3(x0, tileHeight, z);
+                    Vector3 end = new Vector3(x1, tileHeight, z);
                     AppendGridSegment(data, ref vertexOffset, ref indexOffset, start, end, halfThickness, vertexColor);
                 }
             }
 
+            // Vertical grid lines - each segment is flat at the tile's center height
             for (int col = 0; col <= width; col++)
             {
                 float x = startX + col * TILE_SIZE;
@@ -311,10 +314,11 @@ namespace DivineDragon.MapTools
                 {
                     float z0 = startZ + rowIndex * TILE_SIZE;
                     float z1 = startZ + (rowIndex + 1) * TILE_SIZE;
-                    float hStart = ResolveCornerHeight(cache, settings, col, rowIndex) + lift;
-                    float hEnd = ResolveCornerHeight(cache, settings, col, rowIndex + 1) + lift;
-                    Vector3 start = new Vector3(x, hStart, z0);
-                    Vector3 end = new Vector3(x, hEnd, z1);
+                    // Use tile center height for flat vertical line
+                    int tileCol = Mathf.Clamp(col, 0, width - 1);
+                    float tileHeight = ResolveTileHeight(cache, settings, tileCol, rowIndex) + lift;
+                    Vector3 start = new Vector3(x, tileHeight, z0);
+                    Vector3 end = new Vector3(x, tileHeight, z1);
                     AppendGridSegment(data, ref vertexOffset, ref indexOffset, start, end, halfThickness, vertexColor);
                 }
             }
@@ -502,15 +506,13 @@ namespace DivineDragon.MapTools
                     float baseX = startX + col * TILE_SIZE;
                     float baseZ = startZ + row * TILE_SIZE;
 
-                    float h00 = ResolveCornerHeight(cache, settings, col, row);
-                    float h10 = ResolveCornerHeight(cache, settings, col + 1, row);
-                    float h11 = ResolveCornerHeight(cache, settings, col + 1, row + 1);
-                    float h01 = ResolveCornerHeight(cache, settings, col, row + 1);
+                    // Flat tile: single height for all 4 corners
+                    float tileHeight = ResolveTileHeight(cache, settings, col, row);
 
-                    data.vertices[vertexOffset] = new Vector3(baseX, h00, baseZ);
-                    data.vertices[vertexOffset + 1] = new Vector3(baseX + TILE_SIZE, h10, baseZ);
-                    data.vertices[vertexOffset + 2] = new Vector3(baseX + TILE_SIZE, h11, baseZ + TILE_SIZE);
-                    data.vertices[vertexOffset + 3] = new Vector3(baseX, h01, baseZ + TILE_SIZE);
+                    data.vertices[vertexOffset] = new Vector3(baseX, tileHeight, baseZ);
+                    data.vertices[vertexOffset + 1] = new Vector3(baseX + TILE_SIZE, tileHeight, baseZ);
+                    data.vertices[vertexOffset + 2] = new Vector3(baseX + TILE_SIZE, tileHeight, baseZ + TILE_SIZE);
+                    data.vertices[vertexOffset + 3] = new Vector3(baseX, tileHeight, baseZ + TILE_SIZE);
 
                     string terrainId = grid.GetTerrainId(col, row);
                     Color tileColor = IsEmptyTerrain(terrainId) ? new Color(0f, 0f, 0f, 0f) : GetTileFillColor(terrainId);
