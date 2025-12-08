@@ -49,6 +49,29 @@ namespace DivineDragon.MapTools
 
         internal static string GetTerrainName(string tid)
         {
+            if (!TryGetTerrain(tid, out TerrainType terrain))
+            {
+                return null;
+            }
+            return TerrainLocalizer.GetLocalizedName(terrain.name);
+        }
+
+        /// <summary>
+        /// Returns display string in format "LocalizedName (TID)" or just "TID" if no name.
+        /// </summary>
+        internal static string GetDisplayString(string tid)
+        {
+            string name = GetTerrainName(tid);
+            if (string.IsNullOrEmpty(name) || name == tid)
+                return tid ?? string.Empty;
+            return $"{name} ({tid})";
+        }
+
+        /// <summary>
+        /// Get the raw MTID key (e.g., "MTID_Ground") without localization.
+        /// </summary>
+        internal static string GetTerrainMtid(string tid)
+        {
             return TryGetTerrain(tid, out TerrainType terrain) ? terrain.name : null;
         }
 

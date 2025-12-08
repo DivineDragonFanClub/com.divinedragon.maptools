@@ -70,6 +70,7 @@ namespace DivineDragon.MapTools
             SceneView.duringSceneGui += OnSceneGUI;
             EditorApplication.update += OnEditorUpdate;
             TerrainPaintToolWindow.OnTerrainDataChanged += OnTerrainDataChanged;
+            TerrainPaintToolWindow.OnTerrainSelectionChanged += OnTerrainSelectionChanged;
             naturalScroll = EditorPrefs.GetBool(PREFS_NATURAL_SCROLL, false);
 
             // Auto-sync with paint tool on enable (handles recompile/reopen)
@@ -84,6 +85,7 @@ namespace DivineDragon.MapTools
             SceneView.duringSceneGui -= OnSceneGUI;
             EditorApplication.update -= OnEditorUpdate;
             TerrainPaintToolWindow.OnTerrainDataChanged -= OnTerrainDataChanged;
+            TerrainPaintToolWindow.OnTerrainSelectionChanged -= OnTerrainSelectionChanged;
             CleanupTexture();
         }
 
@@ -92,6 +94,15 @@ namespace DivineDragon.MapTools
             if (isCurrentMapMode && changedTerrain == terrain)
             {
                 textureDirty = true;
+                Repaint();
+            }
+        }
+
+        private void OnTerrainSelectionChanged(TerrainAssetAdapter newTerrain)
+        {
+            if (isCurrentMapMode)
+            {
+                SyncWithPaintTool();
                 Repaint();
             }
         }
@@ -506,8 +517,8 @@ namespace DivineDragon.MapTools
                 return;
             }
 
-            // Handle zoom with scroll wheel inside minimap
-            if (mouseInside && e.type == EventType.ScrollWheel)
+            // Handle zoom with scroll wheel inside minimap (only in current map mode)
+            if (mouseInside && e.type == EventType.ScrollWheel && isCurrentMapMode)
             {
                 ZoomSceneView(e.delta.y);
                 e.Use();
@@ -553,25 +564,25 @@ namespace DivineDragon.MapTools
 
                 if (isSampleModifier)
                 {
-                    // Sample terrain as brush
+                    // Sample terrain as brush (works in both modes)
                     if (!string.IsNullOrEmpty(hoveredTerrainTid))
                     {
                         TerrainPaintToolWindow.SetBrushTerrain(hoveredTerrainTid);
                         Debug.Log($"[Minimap] Sampled brush: {hoveredTerrainTid}");
                     }
+                    e.Use();
                 }
-                else
+                else if (isCurrentMapMode)
                 {
-                    // Jump camera to tile and start drag-pan (continuous)
+                    // Jump camera to tile and start drag-pan (only in current map mode)
                     JumpToTile(worldTileXFloat, worldTileYFloat);
                     isDraggingMinimap = true;
                     lastDragTile = new Vector2(worldTileXFloat, worldTileYFloat);
+                    e.Use();
                 }
-
-                e.Use();
             }
 
-            if (e.type == EventType.MouseDrag && isDraggingMinimap && e.button == 0)
+            if (e.type == EventType.MouseDrag && isDraggingMinimap && e.button == 0 && isCurrentMapMode)
             {
                 Vector2 current = new Vector2(worldTileXFloat, worldTileYFloat);
                 if (!Mathf.Approximately(current.x, lastDragTile.x) || !Mathf.Approximately(current.y, lastDragTile.y))
@@ -596,26 +607,16 @@ namespace DivineDragon.MapTools
             var sv = SceneView.lastActiveSceneView;
             if (sv == null) return;
 
-            // Respect natural scroll preference (invert if needed)
+            // scrollDelta > 0 = scroll down, scrollDelta < 0 = scroll up
+            // Natural (default): scroll down = zoom in, scroll up = zoom out (content follows finger)
+            // Traditional: scroll up = zoom in, scroll down = zoom out
             float direction = naturalScroll ? 1f : -1f;
             float factor = Mathf.Exp(scrollDelta * direction * 0.05f);
-            factor = Mathf.Clamp(factor, 0.01f, 100f);
 
-            if (sv.orthographic)
-            {
-                float newSize = Mathf.Clamp(sv.size * factor, MIN_ORTHO_SIZE, MAX_ORTHO_SIZE);
-                sv.size = newSize;
-                sv.Repaint();
-                return;
-            }
-
-            if (sv.camera == null) return;
-
-            float currentDistance = Vector3.Distance(sv.camera.transform.position, sv.pivot);
-            currentDistance = Mathf.Max(currentDistance, 0.0001f);
-            float newDistance = Mathf.Clamp(currentDistance * factor, MIN_CAMERA_DISTANCE, MAX_CAMERA_DISTANCE);
-
-            sv.LookAt(sv.pivot, sv.rotation, newDistance);
+            // sv.size controls zoom for both orthographic and perspective cameras
+            float newSize = sv.size * factor;
+            newSize = Mathf.Clamp(newSize, MIN_ORTHO_SIZE, MAX_ORTHO_SIZE);
+            sv.size = newSize;
             sv.Repaint();
         }
 

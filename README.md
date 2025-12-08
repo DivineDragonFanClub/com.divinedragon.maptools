@@ -1,6 +1,8 @@
 # Getting started
 
-This currently requires a custom branch of the dumper. 
+This currently requires a manual cloning and inclusion of the msbt package, found at https://github.com/DivineDragonFanClub/com.divinedragon.msbt.
+
+This also currently requires a custom branch of the dumper. 
 
 Use 
 ```

@@ -148,13 +148,15 @@ namespace DivineDragon.MapTools
         {
             if (filterLower == null) return true;
             bool matchesTid = t.tid.ToLowerInvariant().Contains(filterLower);
-            bool matchesName = !string.IsNullOrEmpty(t.name) && t.name.ToLowerInvariant().Contains(filterLower);
-            return matchesTid || matchesName;
+            bool matchesMtid = !string.IsNullOrEmpty(t.name) && t.name.ToLowerInvariant().Contains(filterLower);
+            string localizedName = TerrainDefinitions.GetTerrainName(t.tid);
+            bool matchesLocalizedName = !string.IsNullOrEmpty(localizedName) && localizedName.ToLowerInvariant().Contains(filterLower);
+            return matchesTid || matchesMtid || matchesLocalizedName;
         }
 
         private string GetDisplayName(TerrainType t)
         {
-            return string.IsNullOrEmpty(t.name) ? t.tid : $"{t.name} ({t.tid})";
+            return TerrainDefinitions.GetDisplayString(t.tid);
         }
 
         private void DrawTerrainRow(TerrainType t, bool isSelected, System.Action onSelect)
