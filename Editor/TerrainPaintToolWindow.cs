@@ -597,14 +597,6 @@ namespace DivineDragon.MapTools
             buffer[3] = new Vector3(x, baseY, z + size);
         }
 
-        private static void FillQuadWithCornerHeights(Vector3[] buffer, float x, float z, float size, float h00, float h10, float h11, float h01)
-        {
-            buffer[0] = new Vector3(x, h00, z);
-            buffer[1] = new Vector3(x + size, h10, z);
-            buffer[2] = new Vector3(x + size, h11, z + size);
-            buffer[3] = new Vector3(x, h01, z + size);
-        }
-
         // Modifier detection for sampling (support Ctrl and Cmd)
         private static bool IsSamplingModifier(Event e)
         {
@@ -2463,43 +2455,38 @@ namespace DivineDragon.MapTools
                 float tileZ = startZ + tile.y * TILE_SIZE;
 
                 // Check each edge to see if it's a border
+                // Use tile center height for flat border edges
+                float tileHeight = ResolveTileHeight(heightCache, heightSettings, tile.x, tile.y) + 0.06f;
+
                 // Top edge
                 if (!paintedTiles.Contains(new Vector2Int(tile.x, tile.y + 1)))
                 {
-                    float hStart = ResolveCornerHeight(heightCache, heightSettings, tile.x, tile.y + 1) + 0.06f;
-                    float hEnd = ResolveCornerHeight(heightCache, heightSettings, tile.x + 1, tile.y + 1) + 0.06f;
-                    Vector3 lineStart = new Vector3(tileX, hStart, tileZ + TILE_SIZE);
-                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, hEnd, tileZ + TILE_SIZE);
+                    Vector3 lineStart = new Vector3(tileX, tileHeight, tileZ + TILE_SIZE);
+                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, tileHeight, tileZ + TILE_SIZE);
                     Handles.DrawLine(lineStart, lineEnd, borderThickness);
                 }
 
                 // Right edge
                 if (!paintedTiles.Contains(new Vector2Int(tile.x + 1, tile.y)))
                 {
-                    float hStart = ResolveCornerHeight(heightCache, heightSettings, tile.x + 1, tile.y) + 0.06f;
-                    float hEnd = ResolveCornerHeight(heightCache, heightSettings, tile.x + 1, tile.y + 1) + 0.06f;
-                    Vector3 lineStart = new Vector3(tileX + TILE_SIZE, hStart, tileZ);
-                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, hEnd, tileZ + TILE_SIZE);
+                    Vector3 lineStart = new Vector3(tileX + TILE_SIZE, tileHeight, tileZ);
+                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, tileHeight, tileZ + TILE_SIZE);
                     Handles.DrawLine(lineStart, lineEnd, borderThickness);
                 }
 
                 // Bottom edge
                 if (!paintedTiles.Contains(new Vector2Int(tile.x, tile.y - 1)))
                 {
-                    float hStart = ResolveCornerHeight(heightCache, heightSettings, tile.x, tile.y) + 0.06f;
-                    float hEnd = ResolveCornerHeight(heightCache, heightSettings, tile.x + 1, tile.y) + 0.06f;
-                    Vector3 lineStart = new Vector3(tileX, hStart, tileZ);
-                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, hEnd, tileZ);
+                    Vector3 lineStart = new Vector3(tileX, tileHeight, tileZ);
+                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, tileHeight, tileZ);
                     Handles.DrawLine(lineStart, lineEnd, borderThickness);
                 }
 
                 // Left edge
                 if (!paintedTiles.Contains(new Vector2Int(tile.x - 1, tile.y)))
                 {
-                    float hStart = ResolveCornerHeight(heightCache, heightSettings, tile.x, tile.y) + 0.06f;
-                    float hEnd = ResolveCornerHeight(heightCache, heightSettings, tile.x, tile.y + 1) + 0.06f;
-                    Vector3 lineStart = new Vector3(tileX, hStart, tileZ);
-                    Vector3 lineEnd = new Vector3(tileX, hEnd, tileZ + TILE_SIZE);
+                    Vector3 lineStart = new Vector3(tileX, tileHeight, tileZ);
+                    Vector3 lineEnd = new Vector3(tileX, tileHeight, tileZ + TILE_SIZE);
                     Handles.DrawLine(lineStart, lineEnd, borderThickness);
                 }
             }
@@ -2546,59 +2533,47 @@ namespace DivineDragon.MapTools
         private static void DrawRegionHighlight(HashSet<Vector2Int> region, float startX, float startZ, TerrainHeightCache heightCache, TerrainHeightSettings heightSettings, string terrainId)
         {
             if (region.Count == 0) return;
-            
+
             // Only draw borders - no tile overlay to reduce visual noise
-            // Build set of border edges
-            HashSet<(Vector2Int, Vector2Int)> edges = new HashSet<(Vector2Int, Vector2Int)>();
-            
+            // Build list of border edges with their owning tile (for flat tile height)
+            // Each edge is: (tile, edge start vertex offset, edge end vertex offset)
+            List<(Vector2Int tile, Vector2Int startOffset, Vector2Int endOffset)> edges = new List<(Vector2Int, Vector2Int, Vector2Int)>();
+
             foreach (var tile in region)
             {
-                // Check each edge
-                Vector2Int[] neighbors = new Vector2Int[]
-                {
-                    tile + new Vector2Int(0, 1),   // top
-                    tile + new Vector2Int(1, 0),   // right
-                    tile + new Vector2Int(0, -1),  // bottom
-                    tile + new Vector2Int(-1, 0)   // left
-                };
-                
                 // Top edge
-                if (!region.Contains(neighbors[0]))
+                if (!region.Contains(tile + new Vector2Int(0, 1)))
                 {
-                    var edge = (new Vector2Int(tile.x, tile.y + 1), new Vector2Int(tile.x + 1, tile.y + 1));
-                    edges.Add(edge);
+                    edges.Add((tile, new Vector2Int(0, 1), new Vector2Int(1, 1)));
                 }
                 // Right edge
-                if (!region.Contains(neighbors[1]))
+                if (!region.Contains(tile + new Vector2Int(1, 0)))
                 {
-                    var edge = (new Vector2Int(tile.x + 1, tile.y), new Vector2Int(tile.x + 1, tile.y + 1));
-                    edges.Add(edge);
+                    edges.Add((tile, new Vector2Int(1, 0), new Vector2Int(1, 1)));
                 }
                 // Bottom edge
-                if (!region.Contains(neighbors[2]))
+                if (!region.Contains(tile + new Vector2Int(0, -1)))
                 {
-                    var edge = (new Vector2Int(tile.x, tile.y), new Vector2Int(tile.x + 1, tile.y));
-                    edges.Add(edge);
+                    edges.Add((tile, new Vector2Int(0, 0), new Vector2Int(1, 0)));
                 }
                 // Left edge
-                if (!region.Contains(neighbors[3]))
+                if (!region.Contains(tile + new Vector2Int(-1, 0)))
                 {
-                    var edge = (new Vector2Int(tile.x, tile.y), new Vector2Int(tile.x, tile.y + 1));
-                    edges.Add(edge);
+                    edges.Add((tile, new Vector2Int(0, 0), new Vector2Int(0, 1)));
                 }
             }
-            
+
             // Calculate colors based on terrain brightness for contrast
             Color baseColor = GetBaseTerrainColor(terrainId);
             float brightnessCheck = baseColor.r * 0.299f + baseColor.g * 0.587f + baseColor.b * 0.114f;
             bool isDarkTerrain = brightnessCheck < 0.4f;
-            
+
             // Draw multi-pass border with soft blur effect
             // Contrasting base color (black for light terrains, white for dark terrains)
-            Color outlineColor = isDarkTerrain ? 
+            Color outlineColor = isDarkTerrain ?
                 new Color(1f, 1f, 1f, 1f) :  // White for dark terrains
                 new Color(0f, 0f, 0f, 1f);    // Black for light terrains
-            
+
             // Calculate the main border color
             float boost = isDarkTerrain ? 1.5f : 1.2f;
             Color borderColor = new Color(
@@ -2607,7 +2582,7 @@ namespace DivineDragon.MapTools
                 Mathf.Min(1f, baseColor.b * boost),
                 1f
             );
-            
+
             // Draw multiple passes to create soft blur effect
             // Outer glow (widest, most transparent)
             Color glowColor = Color.Lerp(outlineColor, borderColor, 0.3f);
@@ -2615,10 +2590,9 @@ namespace DivineDragon.MapTools
             Handles.color = glowColor;
             foreach (var edge in edges)
             {
-                float hStart = ResolveCornerHeight(heightCache, heightSettings, edge.Item1.x, edge.Item1.y) + 0.028f;
-                float hEnd = ResolveCornerHeight(heightCache, heightSettings, edge.Item2.x, edge.Item2.y) + 0.028f;
-                Vector3 start = new Vector3(startX + edge.Item1.x * TILE_SIZE, hStart, startZ + edge.Item1.y * TILE_SIZE);
-                Vector3 end = new Vector3(startX + edge.Item2.x * TILE_SIZE, hEnd, startZ + edge.Item2.y * TILE_SIZE);
+                float tileHeight = ResolveTileHeight(heightCache, heightSettings, edge.tile.x, edge.tile.y) + 0.028f;
+                Vector3 start = new Vector3(startX + (edge.tile.x + edge.startOffset.x) * TILE_SIZE, tileHeight, startZ + (edge.tile.y + edge.startOffset.y) * TILE_SIZE);
+                Vector3 end = new Vector3(startX + (edge.tile.x + edge.endOffset.x) * TILE_SIZE, tileHeight, startZ + (edge.tile.y + edge.endOffset.y) * TILE_SIZE);
                 Handles.DrawLine(start, end, 4f);
             }
 
@@ -2628,10 +2602,9 @@ namespace DivineDragon.MapTools
             Handles.color = midColor;
             foreach (var edge in edges)
             {
-                float hStart = ResolveCornerHeight(heightCache, heightSettings, edge.Item1.x, edge.Item1.y) + 0.031f;
-                float hEnd = ResolveCornerHeight(heightCache, heightSettings, edge.Item2.x, edge.Item2.y) + 0.031f;
-                Vector3 start = new Vector3(startX + edge.Item1.x * TILE_SIZE, hStart, startZ + edge.Item1.y * TILE_SIZE);
-                Vector3 end = new Vector3(startX + edge.Item2.x * TILE_SIZE, hEnd, startZ + edge.Item2.y * TILE_SIZE);
+                float tileHeight = ResolveTileHeight(heightCache, heightSettings, edge.tile.x, edge.tile.y) + 0.031f;
+                Vector3 start = new Vector3(startX + (edge.tile.x + edge.startOffset.x) * TILE_SIZE, tileHeight, startZ + (edge.tile.y + edge.startOffset.y) * TILE_SIZE);
+                Vector3 end = new Vector3(startX + (edge.tile.x + edge.endOffset.x) * TILE_SIZE, tileHeight, startZ + (edge.tile.y + edge.endOffset.y) * TILE_SIZE);
                 Handles.DrawLine(start, end, 3f);
             }
 
@@ -2641,10 +2614,9 @@ namespace DivineDragon.MapTools
             Handles.color = coreColor;
             foreach (var edge in edges)
             {
-                float hStart = ResolveCornerHeight(heightCache, heightSettings, edge.Item1.x, edge.Item1.y) + 0.034f;
-                float hEnd = ResolveCornerHeight(heightCache, heightSettings, edge.Item2.x, edge.Item2.y) + 0.034f;
-                Vector3 start = new Vector3(startX + edge.Item1.x * TILE_SIZE, hStart, startZ + edge.Item1.y * TILE_SIZE);
-                Vector3 end = new Vector3(startX + edge.Item2.x * TILE_SIZE, hEnd, startZ + edge.Item2.y * TILE_SIZE);
+                float tileHeight = ResolveTileHeight(heightCache, heightSettings, edge.tile.x, edge.tile.y) + 0.034f;
+                Vector3 start = new Vector3(startX + (edge.tile.x + edge.startOffset.x) * TILE_SIZE, tileHeight, startZ + (edge.tile.y + edge.startOffset.y) * TILE_SIZE);
+                Vector3 end = new Vector3(startX + (edge.tile.x + edge.endOffset.x) * TILE_SIZE, tileHeight, startZ + (edge.tile.y + edge.endOffset.y) * TILE_SIZE);
                 Handles.DrawLine(start, end, 2f);
             }
         }
@@ -2841,44 +2813,39 @@ namespace DivineDragon.MapTools
             {
                 float tileX = startX + tile.x * TILE_SIZE;
                 float tileZ = startZ + tile.y * TILE_SIZE;
+                // Use tile center height for flat border edges
+                float tileHeight = ResolveTileHeight(heightCache, heightSettings, tile.x, tile.y) + 0.02f;
+
                 // Check all 4 edges
                 // Top edge (z+)
                 if (tile.y >= mapHeight - 1 || !islandTiles.Contains(new Vector2Int(tile.x, tile.y + 1)))
                 {
-                    float hStart = ResolveCornerHeight(heightCache, heightSettings, tile.x, tile.y + 1) + 0.02f;
-                    float hEnd = ResolveCornerHeight(heightCache, heightSettings, tile.x + 1, tile.y + 1) + 0.02f;
-                    Vector3 lineStart = new Vector3(tileX, hStart, tileZ + TILE_SIZE);
-                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, hEnd, tileZ + TILE_SIZE);
+                    Vector3 lineStart = new Vector3(tileX, tileHeight, tileZ + TILE_SIZE);
+                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, tileHeight, tileZ + TILE_SIZE);
                     Handles.DrawLine(lineStart, lineEnd, borderThickness);
                 }
-                
+
                 // Right edge (x+)
                 if (tile.x >= mapWidth - 1 || !islandTiles.Contains(new Vector2Int(tile.x + 1, tile.y)))
                 {
-                    float hStart = ResolveCornerHeight(heightCache, heightSettings, tile.x + 1, tile.y) + 0.02f;
-                    float hEnd = ResolveCornerHeight(heightCache, heightSettings, tile.x + 1, tile.y + 1) + 0.02f;
-                    Vector3 lineStart = new Vector3(tileX + TILE_SIZE, hStart, tileZ);
-                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, hEnd, tileZ + TILE_SIZE);
+                    Vector3 lineStart = new Vector3(tileX + TILE_SIZE, tileHeight, tileZ);
+                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, tileHeight, tileZ + TILE_SIZE);
                     Handles.DrawLine(lineStart, lineEnd, borderThickness);
                 }
-                
+
                 // Bottom edge (z-)
                 if (tile.y <= 0 || !islandTiles.Contains(new Vector2Int(tile.x, tile.y - 1)))
                 {
-                    float hStart = ResolveCornerHeight(heightCache, heightSettings, tile.x, tile.y) + 0.02f;
-                    float hEnd = ResolveCornerHeight(heightCache, heightSettings, tile.x + 1, tile.y) + 0.02f;
-                    Vector3 lineStart = new Vector3(tileX, hStart, tileZ);
-                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, hEnd, tileZ);
+                    Vector3 lineStart = new Vector3(tileX, tileHeight, tileZ);
+                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, tileHeight, tileZ);
                     Handles.DrawLine(lineStart, lineEnd, borderThickness);
                 }
-                
+
                 // Left edge (x-)
                 if (tile.x <= 0 || !islandTiles.Contains(new Vector2Int(tile.x - 1, tile.y)))
                 {
-                    float hStart = ResolveCornerHeight(heightCache, heightSettings, tile.x, tile.y) + 0.02f;
-                    float hEnd = ResolveCornerHeight(heightCache, heightSettings, tile.x, tile.y + 1) + 0.02f;
-                    Vector3 lineStart = new Vector3(tileX, hStart, tileZ);
-                    Vector3 lineEnd = new Vector3(tileX, hEnd, tileZ + TILE_SIZE);
+                    Vector3 lineStart = new Vector3(tileX, tileHeight, tileZ);
+                    Vector3 lineEnd = new Vector3(tileX, tileHeight, tileZ + TILE_SIZE);
                     Handles.DrawLine(lineStart, lineEnd, borderThickness);
                 }
             }

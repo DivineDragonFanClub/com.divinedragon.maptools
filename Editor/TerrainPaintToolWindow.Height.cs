@@ -407,13 +407,6 @@ namespace DivineDragon.MapTools
             return ResolveTileHeight(cache, settings, col, row);
         }
 
-        internal static float GetTileCornerWorldHeight(TerrainAssetAdapter terrain, int cornerCol, int cornerRow)
-        {
-            TerrainHeightSettings settings = GetHeightSettings(terrain);
-            TerrainHeightCache cache = settings.mode == TerrainHeightMode.RaycastMesh ? GetOrBuildTerrainHeightCache(terrain, settings) : null;
-            return ResolveCornerHeight(cache, settings, cornerCol, cornerRow);
-        }
-
         private static TerrainHeightCache BuildTerrainHeightCache(TerrainAssetAdapter terrain, TerrainHeightSettings settings)
         {
             var cache = new TerrainHeightCache
@@ -528,16 +521,6 @@ namespace DivineDragon.MapTools
             }
 
             return settings.offset;
-        }
-
-        private static float ResolveCornerHeight(TerrainHeightCache cache, TerrainHeightSettings settings, int col, int row)
-        {
-            // For flat tiles: all 4 corners of a tile use the same center height.
-            // Corner (col, row) is the bottom-left corner of tile (col, row).
-            // Clamp to valid tile indices.
-            int tileCol = cache != null ? Mathf.Clamp(col, 0, Mathf.Max(cache.width - 1, 0)) : 0;
-            int tileRow = cache != null ? Mathf.Clamp(row, 0, Mathf.Max(cache.height - 1, 0)) : 0;
-            return ResolveTileHeight(cache, settings, tileCol, tileRow);
         }
 
         private static void FillTileQuad(Vector3[] buffer, float startX, float startZ, int col, int row, TerrainHeightCache cache, TerrainHeightSettings settings, float fallbackY, float yOffset = 0f)
