@@ -506,7 +506,7 @@ namespace DivineDragon.MapTools
                     float baseX = startX + col * TILE_SIZE;
                     float baseZ = startZ + row * TILE_SIZE;
 
-                    // Flat tile: single height for all 4 corners
+                    // Flat tile: uniform height
                     float tileHeight = ResolveTileHeight(cache, settings, col, row);
 
                     data.vertices[vertexOffset] = new Vector3(baseX, tileHeight, baseZ);

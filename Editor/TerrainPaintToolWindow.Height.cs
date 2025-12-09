@@ -32,8 +32,8 @@ namespace DivineDragon.MapTools
             public float offsetX;
             public float offsetZ;
             public string sceneKey;
-            public float[] centerSamples;
-            public bool anyCenterHits;
+            public float[] tileHeightSamples;
+            public bool anyTileHits;
             public bool autoSelection;
             public string colliderPath;
             public string requestedColliderPath;
@@ -333,7 +333,7 @@ namespace DivineDragon.MapTools
                 return false;
             }
 
-            if (cache == null || cache.centerSamples == null)
+            if (cache == null || cache.tileHeightSamples == null)
             {
                 return false;
             }
@@ -376,7 +376,7 @@ namespace DivineDragon.MapTools
                 return false;
             }
 
-            if (cache.centerSamples.Length != cache.width * cache.height)
+            if (cache.tileHeightSamples.Length != cache.width * cache.height)
             {
                 return false;
             }
@@ -422,10 +422,10 @@ namespace DivineDragon.MapTools
             };
 
             int centerCount = Mathf.Max(0, cache.width * cache.height);
-            cache.centerSamples = new float[centerCount];
+            cache.tileHeightSamples = new float[centerCount];
             for (int i = 0; i < centerCount; i++)
             {
-                cache.centerSamples[i] = float.NaN;
+                cache.tileHeightSamples[i] = float.NaN;
             }
 
             Scene activeScene = SceneManager.GetActiveScene();
@@ -460,14 +460,14 @@ namespace DivineDragon.MapTools
 
                     if (TrySampleHeight(collider, topY, bottomY, maxDistance, centerX, centerZ, out float centerHeight))
                     {
-                        cache.centerSamples[centerIndex] = centerHeight;
-                        cache.anyCenterHits = true;
+                        cache.tileHeightSamples[centerIndex] = centerHeight;
+                        cache.anyTileHits = true;
                     }
                 }
             }
 
             string logKey = BuildRaycastLogKey(terrain, cache.sceneKey, cache.colliderPath);
-            if (cache.anyCenterHits)
+            if (cache.anyTileHits)
             {
                 loggedRaycastFailures.Remove(logKey);
             }
@@ -508,11 +508,11 @@ namespace DivineDragon.MapTools
                 return worldOffset.y;
             }
 
-            if (cache != null && cache.centerSamples != null && cache.width > 0 && cache.height > 0)
+            if (cache != null && cache.tileHeightSamples != null && cache.width > 0 && cache.height > 0)
             {
                 if (col >= 0 && col < cache.width && row >= 0 && row < cache.height)
                 {
-                    float sample = cache.centerSamples[row * cache.width + col];
+                    float sample = cache.tileHeightSamples[row * cache.width + col];
                     if (!float.IsNaN(sample))
                     {
                         return sample + settings.offset;
@@ -530,7 +530,7 @@ namespace DivineDragon.MapTools
 
             if (settings != null && settings.mode == TerrainHeightMode.RaycastMesh && cache != null)
             {
-                // Flat tile: single height for all 4 corners
+                // Flat tile: uniform height
                 float tileHeight = ResolveTileHeight(cache, settings, col, row) + yOffset;
                 FillQuad(buffer, baseX, baseZ, tileHeight, TILE_SIZE, 0f);
                 return;

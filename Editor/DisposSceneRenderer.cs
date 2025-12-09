@@ -46,12 +46,12 @@ namespace DivineDragon.MapTools
             return TerrainPaintToolWindow.GetTileWorldHeight(currentTerrain, tileX, tileZ);
         }
 
-        private void GetTileCornerWorldPositions(int tileX, int tileZ, float lift, out Vector3 bl, out Vector3 br, out Vector3 tr, out Vector3 tl)
+        private void GetTileWorldPositions(int tileX, int tileZ, float lift, out Vector3 bl, out Vector3 br, out Vector3 tr, out Vector3 tl)
         {
             float baseX = TerrainStartX + tileX * TILE_SIZE;
             float baseZ = TerrainStartZ + tileZ * TILE_SIZE;
 
-            // Flat tile: all corners use the same height
+            // Flat tile: uniform height
             float y;
             if (currentTerrain == null)
             {
@@ -694,7 +694,7 @@ namespace DivineDragon.MapTools
                     if (entry.IsGroupHeader) continue;
                     if (!IsEntryVisible(entry)) continue;
 
-                    GetTileCornerWorldPositions(entry.DisposX, entry.DisposY, 0.02f, out Vector3 blW, out Vector3 brW, out Vector3 trW, out Vector3 tlW);
+                    GetTileWorldPositions(entry.DisposX, entry.DisposY, 0.02f, out Vector3 blW, out Vector3 brW, out Vector3 trW, out Vector3 tlW);
                     Vector2 p0 = HandleUtility.WorldToGUIPoint(blW);
                     Vector2 p1 = HandleUtility.WorldToGUIPoint(brW);
                     Vector2 p2 = HandleUtility.WorldToGUIPoint(trW);
@@ -714,7 +714,7 @@ namespace DivineDragon.MapTools
         {
             if (currentTerrain == null || count <= 1) return;
             // Compute the same icon rect used by unit icons for this tile
-            GetTileCornerWorldPositions(tile.x, tile.y, 0.02f, out Vector3 blW, out Vector3 brW, out Vector3 trW, out Vector3 tlW);
+            GetTileWorldPositions(tile.x, tile.y, 0.02f, out Vector3 blW, out Vector3 brW, out Vector3 trW, out Vector3 tlW);
             Vector2 bl = HandleUtility.WorldToGUIPoint(blW);
             Vector2 br = HandleUtility.WorldToGUIPoint(brW);
             Vector2 tl = HandleUtility.WorldToGUIPoint(tlW);
@@ -766,7 +766,7 @@ namespace DivineDragon.MapTools
         public Rect GetStackBadgeRect(Vector2Int tile, int count = 0)
         {
             if (currentTerrain == null) return Rect.zero;
-            GetTileCornerWorldPositions(tile.x, tile.y, 0.02f, out Vector3 blW, out Vector3 brW, out Vector3 trW, out Vector3 tlW);
+            GetTileWorldPositions(tile.x, tile.y, 0.02f, out Vector3 blW, out Vector3 brW, out Vector3 trW, out Vector3 tlW);
 
             // Recompute icon rect for hit testing
             Vector2 bl = HandleUtility.WorldToGUIPoint(blW);
@@ -826,7 +826,7 @@ namespace DivineDragon.MapTools
         {
             float startX = TerrainStartX;
             float startZ = TerrainStartZ;
-            GetTileCornerWorldPositions(tile.x, tile.y, 0.02f, out Vector3 blW, out Vector3 brW, out Vector3 trW, out Vector3 tlW);
+            GetTileWorldPositions(tile.x, tile.y, 0.02f, out Vector3 blW, out Vector3 brW, out Vector3 trW, out Vector3 tlW);
             Vector2 p0 = HandleUtility.WorldToGUIPoint(blW);
             Vector2 p1 = HandleUtility.WorldToGUIPoint(brW);
             Vector2 p2 = HandleUtility.WorldToGUIPoint(trW);
@@ -1076,7 +1076,7 @@ namespace DivineDragon.MapTools
             if (currentTerrain == null) return;
             float startX = TerrainStartX;
             float startZ = TerrainStartZ;
-            GetTileCornerWorldPositions(entry.DisposX, entry.DisposY, 0.02f, out Vector3 bl, out Vector3 br, out Vector3 tr, out Vector3 tl);
+            GetTileWorldPositions(entry.DisposX, entry.DisposY, 0.02f, out Vector3 bl, out Vector3 br, out Vector3 tr, out Vector3 tl);
             Vector3[] verts = new Vector3[] { bl, br, tr, tl };
             Color c = DisposDataLoader.Instance.GetForceColor(entry.Force);
             Handles.DrawSolidRectangleWithOutline(verts, c, Color.black);
