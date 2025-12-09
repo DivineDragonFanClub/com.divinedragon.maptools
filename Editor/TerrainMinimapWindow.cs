@@ -33,6 +33,7 @@ namespace DivineDragon.MapTools
         private string hoveredTerrainTid;
         private string hoveredTerrainName;
         private bool isDraggingMinimap;
+        private bool isMinimapSampleMode; // true when Ctrl/Cmd held while hovering minimap
         private Vector2 lastDragTile = new Vector2(float.MinValue, float.MinValue);
         private bool naturalScroll = false;
         private MinimapGridMode gridMode = MinimapGridMode.None;
@@ -299,6 +300,10 @@ namespace DivineDragon.MapTools
                 DrawViewFrustum(drawRect);
             }
 
+            // Draw hover highlight (subtle) and sample highlight (inverted)
+            DrawHoverHighlight(drawRect);
+            DrawSampleHighlight(drawRect);
+
             // Handle input
             HandleMinimapInput(drawRect);
         }
@@ -431,6 +436,91 @@ namespace DivineDragon.MapTools
             DrawLineLocal(absCorners[1], absCorners[2], frustumColor, thickness);
             DrawLineLocal(absCorners[2], absCorners[3], frustumColor, thickness);
             DrawLineLocal(absCorners[3], absCorners[0], frustumColor, thickness);
+        }
+
+        private void DrawHoverHighlight(Rect minimapRect)
+        {
+            if (terrain == null || virtualGrid == null) return;
+            // Don't show hover highlight if sampling (sample highlight takes over)
+            if (isMinimapSampleMode) return;
+            if (isCurrentMapMode && TerrainPaintToolWindow.IsSampleModeActive) return;
+            // Only show when hovering in minimap
+            if (hoveredTile.x < 0 || hoveredTile.y < 0) return;
+
+            // Bounds check
+            if (hoveredTile.x >= terrain.m_Width || hoveredTile.y >= terrain.m_Height) return;
+
+            // Get terrain color and lighten/darken based on brightness
+            string terrainId = virtualGrid.GetTerrainId(hoveredTile.x, hoveredTile.y);
+            Color terrainColor = TerrainDefinitions.GetColorOrFallback(terrainId);
+
+            // Calculate luminance to decide whether to lighten or darken
+            float luminance = 0.299f * terrainColor.r + 0.587f * terrainColor.g + 0.114f * terrainColor.b;
+            Color highlightColor = luminance > 0.5f
+                ? new Color(0f, 0f, 0f, 0.3f)  // Darken light tiles
+                : new Color(1f, 1f, 1f, 0.3f); // Lighten dark tiles
+
+            // Convert tile to display coordinates
+            int displayX = flipX ? terrain.m_Width - 1 - hoveredTile.x : hoveredTile.x;
+            int displayY = flipY ? hoveredTile.y : terrain.m_Height - 1 - hoveredTile.y;
+
+            float cellWidth = minimapRect.width / terrain.m_Width;
+            float cellHeight = minimapRect.height / terrain.m_Height;
+
+            float left = minimapRect.x + displayX * cellWidth;
+            float top = minimapRect.y + displayY * cellHeight;
+
+            Rect tileRect = new Rect(left, top, cellWidth, cellHeight);
+
+            // Draw subtle highlight overlay
+            EditorGUI.DrawRect(tileRect, highlightColor);
+        }
+
+        private void DrawSampleHighlight(Rect minimapRect)
+        {
+            if (terrain == null || virtualGrid == null) return;
+
+            // Determine which tile to highlight:
+            // - If mouse is in minimap with Ctrl/Cmd held, use the minimap's hovered tile (works in both modes)
+            // - Otherwise, use the main scene view's hovered tile (only in current map mode)
+            Vector2Int sampleTile;
+            if (isMinimapSampleMode && hoveredTile.x >= 0)
+            {
+                sampleTile = hoveredTile;
+            }
+            else if (isCurrentMapMode && TerrainPaintToolWindow.IsSampleModeActive)
+            {
+                sampleTile = TerrainPaintToolWindow.HoveredTile;
+            }
+            else
+            {
+                return;
+            }
+
+            if (sampleTile.x < 0 || sampleTile.y < 0) return;
+
+            // Bounds check
+            if (sampleTile.x >= terrain.m_Width || sampleTile.y >= terrain.m_Height) return;
+
+            // Get terrain color and invert it
+            string terrainId = virtualGrid.GetTerrainId(sampleTile.x, sampleTile.y);
+            Color terrainColor = TerrainDefinitions.GetColorOrFallback(terrainId);
+            Color invertedColor = new Color(1f - terrainColor.r, 1f - terrainColor.g, 1f - terrainColor.b, 1f);
+
+            // Convert tile to display coordinates
+            int displayX = flipX ? terrain.m_Width - 1 - sampleTile.x : sampleTile.x;
+            int displayY = flipY ? sampleTile.y : terrain.m_Height - 1 - sampleTile.y;
+
+            float cellWidth = minimapRect.width / terrain.m_Width;
+            float cellHeight = minimapRect.height / terrain.m_Height;
+
+            float left = minimapRect.x + displayX * cellWidth;
+            float top = minimapRect.y + displayY * cellHeight;
+
+            Rect tileRect = new Rect(left, top, cellWidth, cellHeight);
+
+            // Draw inverted color tile
+            EditorGUI.DrawRect(tileRect, invertedColor);
         }
 
         private Vector3? RayPlaneIntersect(Ray ray, float planeY)
@@ -657,8 +747,12 @@ namespace DivineDragon.MapTools
                 hoveredTile = new Vector2Int(-1, -1);
                 hoveredTerrainTid = null;
                 hoveredTerrainName = null;
+                isMinimapSampleMode = false;
                 return;
             }
+
+            // Track if we're in minimap sample mode (Ctrl/Cmd held while mouse inside)
+            isMinimapSampleMode = mouseInside && (e.control || e.command);
 
             // Handle zoom with scroll wheel inside minimap (only in current map mode)
             if (mouseInside && e.type == EventType.ScrollWheel && isCurrentMapMode)
@@ -711,7 +805,6 @@ namespace DivineDragon.MapTools
                     if (!string.IsNullOrEmpty(hoveredTerrainTid))
                     {
                         TerrainPaintToolWindow.SetBrushTerrain(hoveredTerrainTid);
-                        Debug.Log($"[Minimap] Sampled brush: {hoveredTerrainTid}");
                     }
                     e.Use();
                 }
@@ -796,8 +889,43 @@ namespace DivineDragon.MapTools
         {
             EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
 
-            if (hoveredTile.x >= 0 && terrain != null)
+            // Determine sampling state:
+            // - Minimap sample mode takes priority (mouse in minimap with Ctrl/Cmd) - works in both modes
+            // - Scene view sample mode only applies in current map mode
+            bool isSamplingFromMinimap = isMinimapSampleMode && hoveredTile.x >= 0;
+            bool isSamplingFromScene = isCurrentMapMode && !isMinimapSampleMode && TerrainPaintToolWindow.IsSampleModeActive;
+
+            if (isSamplingFromMinimap && terrain != null && virtualGrid != null)
             {
+                // Show color chip + "Sampling" with minimap's hovered tile
+                DrawStatusBarColorChip(hoveredTerrainTid);
+                string displayName = !string.IsNullOrEmpty(hoveredTerrainTid)
+                    ? TerrainDefinitions.GetDisplayString(hoveredTerrainTid)
+                    : "Empty";
+                EditorGUILayout.LabelField($"Sampling ({hoveredTile.x}, {hoveredTile.y}): {displayName}", EditorStyles.miniLabel);
+            }
+            else if (isSamplingFromScene && terrain != null && virtualGrid != null)
+            {
+                // Show color chip + "Sampling" with main view's hovered tile
+                Vector2Int sampleTile = TerrainPaintToolWindow.HoveredTile;
+                if (sampleTile.x >= 0)
+                {
+                    string sampleTerrainTid = virtualGrid.GetTerrainId(sampleTile.x, sampleTile.y);
+                    DrawStatusBarColorChip(sampleTerrainTid);
+                    string displayName = !string.IsNullOrEmpty(sampleTerrainTid)
+                        ? TerrainDefinitions.GetDisplayString(sampleTerrainTid)
+                        : "Empty";
+                    EditorGUILayout.LabelField($"Sampling ({sampleTile.x}, {sampleTile.y}): {displayName}", EditorStyles.miniLabel);
+                }
+                else
+                {
+                    EditorGUILayout.LabelField("Sampling...", EditorStyles.miniLabel);
+                }
+            }
+            else if (hoveredTile.x >= 0 && terrain != null)
+            {
+                // Show color chip + normal hover display (local minimap hover)
+                DrawStatusBarColorChip(hoveredTerrainTid);
                 string displayName = !string.IsNullOrEmpty(hoveredTerrainTid)
                     ? TerrainDefinitions.GetDisplayString(hoveredTerrainTid)
                     : "Empty";
@@ -812,6 +940,33 @@ namespace DivineDragon.MapTools
             }
 
             EditorGUILayout.EndHorizontal();
+        }
+
+        private void DrawStatusBarColorChip(string terrainTid)
+        {
+            Color chipColor;
+            if (string.IsNullOrEmpty(terrainTid) || TerrainVirtualGridCache.IsEmptyTerrain(terrainTid))
+            {
+                chipColor = new Color(0.3f, 0.3f, 0.3f, 1f);
+            }
+            else
+            {
+                chipColor = TerrainDefinitions.GetColorOrFallback(terrainTid);
+            }
+
+            // Reserve space and center the chip vertically
+            const float chipSize = 12f;
+            Rect reservedRect = GUILayoutUtility.GetRect(chipSize, EditorGUIUtility.singleLineHeight, GUILayout.Width(chipSize));
+            float yOffset = (reservedRect.height - chipSize) / 2f;
+            Rect chipRect = new Rect(reservedRect.x, reservedRect.y + yOffset, chipSize, chipSize);
+
+            EditorGUI.DrawRect(chipRect, chipColor);
+            // Draw border
+            EditorGUI.DrawRect(new Rect(chipRect.x, chipRect.y, chipRect.width, 1), Color.black);
+            EditorGUI.DrawRect(new Rect(chipRect.x, chipRect.yMax - 1, chipRect.width, 1), Color.black);
+            EditorGUI.DrawRect(new Rect(chipRect.x, chipRect.y, 1, chipRect.height), Color.black);
+            EditorGUI.DrawRect(new Rect(chipRect.xMax - 1, chipRect.y, 1, chipRect.height), Color.black);
+            GUILayout.Space(4);
         }
 
         private void RebuildMinimapTexture()

@@ -258,6 +258,7 @@ namespace DivineDragon.MapTools
         private const int brushSize = 1;
         private static Vector2Int hoveredTile = new Vector2Int(-1, -1);
         private static bool isMouseOverGrid = false;
+        private static bool isSampleModeActiveCache = false;
 
         private const string EmptyTerrainTid = "TID_無し";
         private const string NoEntryTerrainId = "MTID_NoEntry";
@@ -347,6 +348,18 @@ namespace DivineDragon.MapTools
         /// Used by TerrainMinimapWindow to sync with the main editor.
         /// </summary>
         public static TerrainAssetAdapter SelectedTerrain => selectedTerrain;
+
+        /// <summary>
+        /// Gets the currently hovered tile in the paint tool.
+        /// Returns (-1, -1) if no tile is being hovered.
+        /// </summary>
+        public static Vector2Int HoveredTile => hoveredTile;
+
+        /// <summary>
+        /// Gets whether sample mode is currently active (Ctrl/Cmd held in paint mode).
+        /// This is cached during scene GUI and safe to read from other windows.
+        /// </summary>
+        public static bool IsSampleModeActive => isSampleModeActiveCache;
 
         /// <summary>
         /// Sets the active brush terrain by TID.
@@ -1233,11 +1246,7 @@ namespace DivineDragon.MapTools
                             EditorGUI.DrawRect(colorRectH, hColor);
                             EditorGUI.DrawRect(colorRectH, new Color(0, 0, 0, 0.2f));
 
-                            string displayNameH = GetTerrainDisplayText(hoveredIdForPanel);
-                            if (string.IsNullOrEmpty(displayNameH))
-                            {
-                                displayNameH = hoveredIdForPanel;
-                            }
+                            string displayNameH = TerrainDefinitions.GetDisplayString(hoveredIdForPanel);
                             EditorGUILayout.LabelField(displayNameH, EditorStyles.boldLabel);
                         }
                         else
@@ -1262,12 +1271,8 @@ namespace DivineDragon.MapTools
                         Rect colorRect = GUILayoutUtility.GetRect(20, 20, GUILayout.Width(20));
                         EditorGUI.DrawRect(colorRect, terrainColor);
                         EditorGUI.DrawRect(colorRect, new Color(0, 0, 0, 0.2f)); // Border
-                        
-                        string displayName = GetTerrainDisplayText(selectedBrushTerrain);
-                        if (string.IsNullOrEmpty(displayName))
-                        {
-                            displayName = selectedBrushTerrain;
-                        }
+
+                        string displayName = TerrainDefinitions.GetDisplayString(selectedBrushTerrain);
                         EditorGUILayout.LabelField(displayName, EditorStyles.boldLabel);
                     }
                     else
@@ -1477,6 +1482,7 @@ namespace DivineDragon.MapTools
                 }
                 isMouseOverGrid = false;
                 hoveredTile = new Vector2Int(-1, -1);
+                isSampleModeActiveCache = false;
                 PruneMeshCaches(selectedTerrain);
                 return;
             }
@@ -1937,6 +1943,7 @@ namespace DivineDragon.MapTools
             {
                 isMouseOverGrid = false;
                 hoveredTile = new Vector2Int(-1, -1);
+                isSampleModeActiveCache = false;
                 if (isPaintingStroke)
                 {
                     EndPaintStroke();
@@ -1966,6 +1973,7 @@ namespace DivineDragon.MapTools
                 if (Mathf.Approximately(denom, 0f))
                 {
                     isMouseOverGrid = false;
+                    isSampleModeActiveCache = false;
                     return;
                 }
 
@@ -1973,6 +1981,7 @@ namespace DivineDragon.MapTools
                 if (distance < 0f)
                 {
                     isMouseOverGrid = false;
+                    isSampleModeActiveCache = false;
                     return;
                 }
 
@@ -1986,6 +1995,7 @@ namespace DivineDragon.MapTools
             if (gridX < 0 || gridX >= width || gridZ < 0 || gridZ >= height)
             {
                 isMouseOverGrid = false;
+                isSampleModeActiveCache = false;
                 if (isPaintingStroke)
                 {
                     EndPaintStroke();
@@ -1995,6 +2005,9 @@ namespace DivineDragon.MapTools
 
             hoveredTile = new Vector2Int(gridX, gridZ);
             isMouseOverGrid = true;
+
+            // Update sample mode cache for external windows (e.g., minimap)
+            isSampleModeActiveCache = paintMode && IsSamplingModifier(currentEvent);
 
             if (paintMode && IsTerrainEditingEnabled)
             {
