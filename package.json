@@ -3,5 +3,5 @@
   "displayName": "Map Tools",
   "version": "1.0.0",
   "unity": "2020.3",
-  "description": "Editor tooling for map terrain painting and dispos editing."
+  "description": "Editor tooling for map terrain painting."
 }

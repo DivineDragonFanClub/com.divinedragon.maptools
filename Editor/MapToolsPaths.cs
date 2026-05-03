@@ -19,7 +19,6 @@ namespace DivineDragon.MapTools
         // Project asset paths (constant)
         public const string GameDataShareAssetPath = "Assets/Share/Addressables/Patch/Patch3/GameData";
         public const string ChapterAssetPath = GameDataShareAssetPath + "/Chapter.xml";
-        public const string DisposShareAssetPath = "Assets/Share/Addressables/GameData/Dispos";
 
         /// <summary>
         /// Returns true if the game data paths are configured.

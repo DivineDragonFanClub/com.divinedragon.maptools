@@ -30,7 +30,6 @@ namespace DivineDragon.MapTools
 
     public enum SharedEditorMode
     {
-        Dispos,
         Terrain,
         Off
     }
@@ -193,7 +192,6 @@ namespace DivineDragon.MapTools
     {
 
         private static TerrainPaintToolWindow instance;
-        // External tools (e.g., Dispos tool) can lock painting while keeping visualization
         private static SharedEditorMode sharedMode = SharedEditorMode.Terrain;
         private static TerrainAssetAdapter selectedTerrain;
         private static bool showGridLines = true;
@@ -305,7 +303,7 @@ namespace DivineDragon.MapTools
             }
 
             sharedMode = mode;
-            if (mode != SharedEditorMode.Terrain)
+            if (mode == SharedEditorMode.Off)
             {
                 if (isPaintingStroke)
                 {
@@ -315,7 +313,6 @@ namespace DivineDragon.MapTools
             }
 
             SceneView.RepaintAll();
-            DisposToolWindow.RequestRepaintAll(repaintScene: mode != SharedEditorMode.Off);
         }
 
         public static bool IsTerrainEditingEnabled => sharedMode == SharedEditorMode.Terrain;
@@ -328,19 +325,6 @@ namespace DivineDragon.MapTools
         public static bool ShouldRenderTerrainGrid()
         {
             return sharedMode != SharedEditorMode.Off && showGridLines && selectedTerrain != null;
-        }
-
-        // Legacy bridge for existing callers
-        public static void SetExternalInteractionLocked(bool locked)
-        {
-            if (locked)
-            {
-                SetSharedEditorMode(SharedEditorMode.Dispos);
-            }
-            else if (sharedMode == SharedEditorMode.Dispos)
-            {
-                SetSharedEditorMode(SharedEditorMode.Terrain);
-            }
         }
 
         /// <summary>
@@ -543,7 +527,6 @@ namespace DivineDragon.MapTools
         {
             InvalidateTerrainHeightCache(null);
             SceneView.RepaintAll();
-            DisposToolWindow.RequestRepaintAll(repaintScene: true);
         }
 
         private static void OnHierarchyChanged()
@@ -861,13 +844,6 @@ namespace DivineDragon.MapTools
             AssetDatabase.Refresh();
         }
 
-        private static void RequestToolRepaint(bool repaintScene = true)
-        {
-            SceneView.RepaintAll();
-            DisposToolWindow.RequestRepaintAll(repaintScene: repaintScene);
-        }
-        
-        
         private static int uiTabIndex = 0; // 0 = Main, 1 = Settings, 2 = Advanced
 
         private void DrawGridHeightControls(TerrainAssetAdapter terrain)
@@ -886,7 +862,7 @@ namespace DivineDragon.MapTools
             if (EditorGUI.EndChangeCheck())
             {
                 SetHeightModeForTerrain(terrain, newMode);
-                RequestToolRepaint();
+                SceneView.RepaintAll();
                 heightSettings = GetHeightSettings(terrain);
             }
 
@@ -899,7 +875,7 @@ namespace DivineDragon.MapTools
                 worldOffset.y = newHeight;
                 heightSettings.offset = newHeight;
                 SaveSettings();
-                RequestToolRepaint();
+                SceneView.RepaintAll();
             }
 
             if (heightSettings.mode == TerrainHeightMode.RaycastMesh)
@@ -913,7 +889,7 @@ namespace DivineDragon.MapTools
                 {
                     SetColliderSelectionForTerrain(terrain, newAutoSelect, heightSettings.colliderPath);
                     heightSettings = GetHeightSettings(terrain);
-                    RequestToolRepaint();
+                    SceneView.RepaintAll();
                 }
 
                 Scene currentScene = SceneManager.GetActiveScene();
@@ -939,7 +915,7 @@ namespace DivineDragon.MapTools
                         {
                             SetColliderSelectionForTerrain(terrain, true, string.Empty);
                             heightSettings = GetHeightSettings(terrain);
-                            RequestToolRepaint();
+                            SceneView.RepaintAll();
                             currentManualCollider = null;
                             currentColliderObject = null;
                         }
@@ -959,7 +935,7 @@ namespace DivineDragon.MapTools
                                 string selectedPath = GetTransformPath(selectedCollider.transform);
                                 SetColliderSelectionForTerrain(terrain, false, selectedPath);
                                 heightSettings = GetHeightSettings(terrain);
-                                RequestToolRepaint();
+                                SceneView.RepaintAll();
                                 currentManualCollider = selectedCollider;
                                 currentColliderObject = selectedCollider.gameObject;
                             }
@@ -1018,7 +994,7 @@ namespace DivineDragon.MapTools
 
             EditorGUILayout.LabelField("Editor Mode", EditorStyles.miniBoldLabel);
             EditorGUI.BeginChangeCheck();
-            int modeIndex = GUILayout.Toolbar((int)sharedMode, new[] { "Dispos", "Terrain", "Off" });
+            int modeIndex = GUILayout.Toolbar((int)sharedMode, new[] { "Terrain", "Off" });
             if (EditorGUI.EndChangeCheck())
             {
                 SetSharedEditorMode((SharedEditorMode)modeIndex);
@@ -1395,11 +1371,7 @@ namespace DivineDragon.MapTools
                     }
                     
                     EditorGUI.EndDisabledGroup(); // End disable group for visualization check
-                    if (!terrainModeActive && GetSharedEditorMode() == SharedEditorMode.Dispos)
-                    {
-                        EditorGUILayout.HelpBox("Terrain editing is disabled while the Dispos editor is active. Switch the mode toggle to Terrain to paint.", MessageType.Info);
-                    }
-                    
+
                     if (EditorGUI.EndChangeCheck())
                     {
                         SceneView.RepaintAll();
