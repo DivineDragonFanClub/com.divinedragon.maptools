@@ -30,13 +30,17 @@ namespace DivineDragon.MapTools
         private string chapterLoadError;
         private bool isExtracting;
         private Vector2 listScroll;
-        private int selectedIndex = -1;
+        private bool isDragChecking;
+        private bool dragCheckValue;
 
         private const float RowHeight = 20f;
+        private const float ColumnCheckboxWidth = 22f;
         private const float ColumnCidWidth = 110f;
         private const float ColumnSceneWidth = 160f;
         private const float ColumnTerrainWidth = 180f;
         private const float ColumnDisposWidth = 140f;
+        private const int ExtractionBatchSize = 10;
+        private const string SkipBulkWarningPrefsKey = "DivineDragon.MapTools.ChapterDumper.SkipBulkWarning";
 
         [MenuItem("Window/Map Tools/Chapter Dumper")]
         public static void ShowWindow()
@@ -65,6 +69,12 @@ namespace DivineDragon.MapTools
 
         private void OnGUI()
         {
+            EventType evt = Event.current.type;
+            if (evt == EventType.MouseUp || evt == EventType.MouseLeaveWindow || evt == EventType.Ignore)
+            {
+                isDragChecking = false;
+            }
+
             if (!MapToolsPaths.IsConfigured)
             {
                 EditorGUILayout.HelpBox(
@@ -73,7 +83,15 @@ namespace DivineDragon.MapTools
                 return;
             }
 
-            EditorGUILayout.LabelField("Chapter XML Status", EditorStyles.boldLabel);
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                EditorGUILayout.LabelField("Chapter XML Status", EditorStyles.boldLabel);
+                GUILayout.FlexibleSpace();
+                if (GUILayout.Button(EditorGUIUtility.IconContent("_Popup"), GUILayout.Width(24), GUILayout.Height(20)))
+                {
+                    ShowSettingsMenu();
+                }
+            }
 
             if (!string.IsNullOrEmpty(chapterAssetPath))
             {
@@ -94,11 +112,20 @@ namespace DivineDragon.MapTools
 
             EditorGUILayout.Space();
 
-            using (new EditorGUI.DisabledScope(selectedIndex < 0 || selectedIndex >= chapters.Count))
+            int checkedCount = 0;
+            for (int i = 0; i < chapters.Count; i++)
             {
-                if (GUILayout.Button("Dump Selected Chapter"))
+                if (chapters[i].Checked) checkedCount++;
+            }
+
+            using (new EditorGUI.DisabledScope(isExtracting || checkedCount == 0))
+            {
+                string label = checkedCount == 0
+                    ? "Dump Checked Chapters"
+                    : $"Dump Checked Chapters ({checkedCount})";
+                if (GUILayout.Button(label, GUILayout.Height(28f)))
                 {
-                    DumpSelectedChapter();
+                    DumpCheckedChapters();
                 }
             }
 
@@ -133,15 +160,35 @@ namespace DivineDragon.MapTools
             listScroll = EditorGUILayout.BeginScrollView(listScroll);
             for (int i = 0; i < chapters.Count; i++)
             {
-                DrawRow(chapters[i], i);
+                DrawRow(chapters[i]);
             }
             EditorGUILayout.EndScrollView();
         }
 
         private void DrawTableHeader()
         {
+            int checkedCount = 0;
+            for (int i = 0; i < chapters.Count; i++)
+            {
+                if (chapters[i].Checked) checkedCount++;
+            }
+            bool allChecked = checkedCount == chapters.Count && chapters.Count > 0;
+            bool isMixed = checkedCount > 0 && !allChecked;
+
             using (new EditorGUILayout.HorizontalScope(EditorStyles.helpBox))
             {
+                EditorGUI.BeginChangeCheck();
+                EditorGUI.showMixedValue = isMixed;
+                bool toggled = GUILayout.Toggle(allChecked, GUIContent.none, GUILayout.Width(ColumnCheckboxWidth));
+                EditorGUI.showMixedValue = false;
+                if (EditorGUI.EndChangeCheck())
+                {
+                    for (int i = 0; i < chapters.Count; i++)
+                    {
+                        chapters[i].Checked = toggled;
+                    }
+                }
+
                 GUILayout.Label("CID", EditorStyles.boldLabel, GUILayout.Width(ColumnCidWidth));
                 GUILayout.Label("Title", EditorStyles.boldLabel);
                 GUILayout.Label("Scene Bundle", EditorStyles.boldLabel, GUILayout.Width(ColumnSceneWidth));
@@ -150,23 +197,11 @@ namespace DivineDragon.MapTools
             }
         }
 
-        private void DrawRow(ChapterRecord chapter, int index)
+        private void DrawRow(ChapterRecord chapter)
         {
             Rect rowRect = GUILayoutUtility.GetRect(0f, RowHeight, GUILayout.ExpandWidth(true));
-            bool isSelected = index == selectedIndex;
 
-            if (Event.current.type == EventType.MouseDown && rowRect.Contains(Event.current.mousePosition))
-            {
-                selectedIndex = index;
-                GUI.FocusControl(null);
-                Repaint();
-            }
-
-            if (isSelected)
-            {
-                EditorGUI.DrawRect(rowRect, new Color(0.24f, 0.36f, 0.64f, 0.25f));
-            }
-            else if (rowRect.Contains(Event.current.mousePosition))
+            if (rowRect.Contains(Event.current.mousePosition))
             {
                 EditorGUI.DrawRect(rowRect, new Color(1f, 1f, 1f, 0.07f));
             }
@@ -174,13 +209,18 @@ namespace DivineDragon.MapTools
             float x = rowRect.x + 4f;
             float y = rowRect.y + 2f;
             float height = rowRect.height - 4f;
-            float titleWidth = rowRect.width - ColumnCidWidth - ColumnSceneWidth - ColumnTerrainWidth - ColumnDisposWidth - 20f;
+            float titleWidth = rowRect.width - ColumnCheckboxWidth - ColumnCidWidth - ColumnSceneWidth - ColumnTerrainWidth - ColumnDisposWidth - 20f;
             if (titleWidth < 60f)
             {
                 titleWidth = 60f;
             }
 
             GUIStyle labelStyle = EditorStyles.label;
+
+            Rect checkboxRect = new Rect(x, y, ColumnCheckboxWidth, height);
+            HandleCheckboxDragPaint(checkboxRect, chapter);
+            EditorGUI.Toggle(checkboxRect, chapter.Checked);
+            x += ColumnCheckboxWidth;
 
             GUI.Label(new Rect(x, y, ColumnCidWidth - 4f, height), chapter.Cid ?? "", labelStyle);
             x += ColumnCidWidth;
@@ -197,71 +237,271 @@ namespace DivineDragon.MapTools
             GUI.Label(new Rect(x, y, ColumnDisposWidth, height), chapter.DisplayDisposBundle ?? string.Empty, labelStyle);
         }
 
-        private void DumpSelectedChapter()
+        private void ShowSettingsMenu()
         {
-            if (selectedIndex < 0 || selectedIndex >= chapters.Count)
-            {
-                return;
-            }
+            var menu = new GenericMenu();
 
-            ChapterRecord chapter = chapters[selectedIndex];
-            List<string> extractionTargets = new List<string>();
-            List<string> warnings = new List<string>();
-
-            EnsureSupportingAssets(extractionTargets);
-
-            if (!TryAddSceneBundle(chapter, extractionTargets))
-            {
-                warnings.Add($"Scene bundle not found for {chapter.Cid}.");
-            }
-
-            if (!TryAddTerrainBundle(chapter, extractionTargets))
-            {
-                warnings.Add($"Terrain bundle not found for {chapter.Cid}.");
-            }
-
-            if (!TryAddDisposBundle(chapter, extractionTargets))
-            {
-                warnings.Add($"Dispos bundle not found for {chapter.Cid}.");
-            }
-
-            if (extractionTargets.Count == 0)
-            {
-                lastMessage = "No bundles queued for extraction.";
-                return;
-            }
-
-            bool success = Dumper.ExtractMultipleAssets(extractionTargets);
-            AssetDatabase.Refresh();
-
-            if (success && warnings.Count == 0)
-            {
-                lastMessage = $"Extraction completed for {chapter.Cid}.";
-            }
-            else
-            {
-                string status = success ? "Extraction finished with warnings." : "Extraction reported failures.";
-                if (warnings.Count > 0)
+            bool isSuppressed = EditorPrefs.GetBool(SkipBulkWarningPrefsKey, false);
+            menu.AddItem(
+                new GUIContent("Suppress bulk dump warning"),
+                isSuppressed,
+                () =>
                 {
-                    status += "\n" + string.Join("\n", warnings);
+                    if (isSuppressed)
+                    {
+                        EditorPrefs.DeleteKey(SkipBulkWarningPrefsKey);
+                    }
+                    else
+                    {
+                        EditorPrefs.SetBool(SkipBulkWarningPrefsKey, true);
+                    }
+                });
+
+            menu.ShowAsContext();
+        }
+
+        private void HandleCheckboxDragPaint(Rect checkboxRect, ChapterRecord chapter)
+        {
+            Event e = Event.current;
+            if (e.button != 0) return;
+
+            bool inside = checkboxRect.Contains(e.mousePosition);
+
+            if (e.type == EventType.MouseDown && inside)
+            {
+                chapter.Checked = !chapter.Checked;
+                isDragChecking = true;
+                dragCheckValue = chapter.Checked;
+                e.Use();
+                Repaint();
+            }
+            else if (e.type == EventType.MouseDrag && isDragChecking && inside)
+            {
+                if (chapter.Checked != dragCheckValue)
+                {
+                    chapter.Checked = dragCheckValue;
+                    Repaint();
                 }
-                lastMessage = status;
             }
         }
 
-        private void EnsureSupportingAssets(List<string> extractionTargets)
+        private void DumpCheckedChapters()
+        {
+            int totalChecked = 0;
+            for (int i = 0; i < chapters.Count; i++)
+            {
+                if (chapters[i].Checked) totalChecked++;
+            }
+
+            if (totalChecked == 0)
+            {
+                lastMessage = "No chapters checked.";
+                return;
+            }
+
+            if (totalChecked > 1 && !EditorPrefs.GetBool(SkipBulkWarningPrefsKey, false))
+            {
+                int choice = EditorUtility.DisplayDialogComplex(
+                    "Dump Multiple Chapters",
+                    $"You're about to dump {totalChecked} chapters. This may take a while.\n\nContinue?",
+                    "Continue",
+                    "Cancel",
+                    "Continue (don't ask again)");
+
+                if (choice == 1) return;
+                if (choice == 2) EditorPrefs.SetBool(SkipBulkWarningPrefsKey, true);
+            }
+
+            HashSet<string> queuedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            List<string> warnings = new List<string>();
+            List<string> batchTargets = new List<string>();
+            List<string> batchChapterLabels = new List<string>();
+
+            int sceneFound = 0, sceneMissing = 0;
+            int terrainFound = 0, terrainMissing = 0;
+            int disposFound = 0, disposMissing = 0;
+            int chaptersWithAnyTargets = 0;
+            bool overallSuccess = true;
+
+            isExtracting = true;
+            try
+            {
+                List<string> supportingTargets = new List<string>();
+                EnsureSupportingAssets(supportingTargets, queuedPaths);
+
+                if (supportingTargets.Count > 0)
+                {
+                    EditorUtility.DisplayProgressBar(WindowTitle, $"Extracting {supportingTargets.Count} supporting bundles...", 0.5f);
+                    if (!RunExtractionBatch(supportingTargets, "[supporting XMLs]"))
+                    {
+                        overallSuccess = false;
+                    }
+                }
+
+                int processedChecked = 0;
+                for (int i = 0; i < chapters.Count; i++)
+                {
+                    ChapterRecord chapter = chapters[i];
+                    if (!chapter.Checked) continue;
+
+                    processedChecked++;
+                    float progress = (float)processedChecked / totalChecked;
+                    EditorUtility.DisplayProgressBar(WindowTitle, $"Queueing bundles ({processedChecked}/{totalChecked})...", progress);
+
+                    int beforeCount = batchTargets.Count;
+                    bool chapterHasBundle = false;
+
+                    if (TryAddSceneBundle(chapter, batchTargets, queuedPaths))
+                    {
+                        sceneFound++;
+                        chapterHasBundle = true;
+                    }
+                    else
+                    {
+                        sceneMissing++;
+                        warnings.Add($"Scene bundle missing for {chapter.Cid}.");
+                    }
+
+                    if (TryAddTerrainBundle(chapter, batchTargets, queuedPaths))
+                    {
+                        terrainFound++;
+                        chapterHasBundle = true;
+                    }
+                    else
+                    {
+                        terrainMissing++;
+                        warnings.Add($"Terrain bundle missing for {chapter.Cid}.");
+                    }
+
+                    if (TryAddDisposBundle(chapter, batchTargets, queuedPaths))
+                    {
+                        disposFound++;
+                        chapterHasBundle = true;
+                    }
+                    else
+                    {
+                        disposMissing++;
+                        warnings.Add($"Dispos bundle missing for {chapter.Cid}.");
+                    }
+
+                    if (chapterHasBundle)
+                    {
+                        chaptersWithAnyTargets++;
+                        if (batchTargets.Count > beforeCount)
+                        {
+                            batchChapterLabels.Add(chapter.Cid);
+                        }
+                    }
+
+                    if (batchTargets.Count >= ExtractionBatchSize)
+                    {
+                        string batchLabel = batchChapterLabels.Count == 0
+                            ? "chapters batch"
+                            : $"{batchChapterLabels[0]}…{batchChapterLabels[batchChapterLabels.Count - 1]}";
+                        EditorUtility.DisplayProgressBar(WindowTitle, $"Extracting {batchTargets.Count} bundles ({batchLabel})...", progress);
+
+                        if (!RunExtractionBatch(batchTargets, batchLabel))
+                        {
+                            overallSuccess = false;
+                        }
+
+                        batchTargets.Clear();
+                        batchChapterLabels.Clear();
+                    }
+                }
+
+                if (batchTargets.Count > 0)
+                {
+                    string batchLabel = batchChapterLabels.Count == 0
+                        ? "final batch"
+                        : $"{batchChapterLabels[0]}…{batchChapterLabels[batchChapterLabels.Count - 1]}";
+                    EditorUtility.DisplayProgressBar(WindowTitle, $"Extracting {batchTargets.Count} bundles ({batchLabel})...", 1f);
+
+                    if (!RunExtractionBatch(batchTargets, batchLabel))
+                    {
+                        overallSuccess = false;
+                    }
+                }
+
+                string statusMessage =
+                    $"Queued {queuedPaths.Count} unique bundles across {chaptersWithAnyTargets} chapters.\n" +
+                    $"Scenes: {sceneFound} found, {sceneMissing} missing. Terrains: {terrainFound} found, {terrainMissing} missing. Dispos: {disposFound} found, {disposMissing} missing.";
+
+                if (!overallSuccess)
+                {
+                    statusMessage = "Extraction reported failures.\n" + statusMessage;
+                }
+
+                if (warnings.Count > 0)
+                {
+                    statusMessage += "\nWarnings:\n" + string.Join("\n", warnings);
+                }
+
+                lastMessage = statusMessage;
+            }
+            catch (Exception ex)
+            {
+                overallSuccess = false;
+                lastMessage = $"Extraction error: {ex.Message}";
+            }
+            finally
+            {
+                isExtracting = false;
+                EditorUtility.ClearProgressBar();
+            }
+
+            if (!overallSuccess)
+            {
+                Debug.LogWarning("[Chapter Dumper] One or more batches reported issues. See the window message for details.");
+            }
+        }
+
+        private bool RunExtractionBatch(List<string> bundlePaths, string label)
+        {
+            if (bundlePaths == null || bundlePaths.Count == 0)
+            {
+                return true;
+            }
+
+            try
+            {
+                bool success = Dumper.ExtractMultipleAssets(bundlePaths);
+                AssetDatabase.Refresh();
+
+                if (!success)
+                {
+                    Debug.LogWarning($"[Chapter Dumper] Batch extraction reported failures for {label} ({bundlePaths.Count} bundles).");
+                }
+                else
+                {
+                    Debug.Log($"[Chapter Dumper] Extracted {bundlePaths.Count} bundles for {label}.");
+                }
+
+                return success;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[Chapter Dumper] Exception while extracting {label}: {ex.Message}");
+                return false;
+            }
+        }
+
+        private void EnsureSupportingAssets(List<string> extractionTargets, HashSet<string> queued = null)
         {
             foreach (var support in GetSupportingAssets())
             {
                 string projectPath = Path.Combine(ProjectRootPath(), support.ExpectedAssetPath).Replace("\\", "/");
                 if (!File.Exists(projectPath) && File.Exists(support.BundlePath))
                 {
-                    extractionTargets.Add(support.BundlePath);
+                    if (queued == null || queued.Add(support.BundlePath))
+                    {
+                        extractionTargets.Add(support.BundlePath);
+                    }
                 }
             }
         }
 
-        private bool TryAddSceneBundle(ChapterRecord chapter, List<string> extractionTargets)
+        private bool TryAddSceneBundle(ChapterRecord chapter, List<string> extractionTargets, HashSet<string> queued = null)
         {
             string suffix = GetChapterSuffix(chapter.Cid);
             if (string.IsNullOrEmpty(suffix))
@@ -274,7 +514,10 @@ namespace DivineDragon.MapTools
                 string bundlePath = $"{MapToolsPaths.GameBuildPath}/fe_scenes_fld_{candidate}.bundle";
                 if (File.Exists(bundlePath))
                 {
-                    extractionTargets.Add(bundlePath);
+                    if (queued == null || queued.Add(bundlePath))
+                    {
+                        extractionTargets.Add(bundlePath);
+                    }
                     chapter.ResolvedSceneBundle = Path.GetFileName(bundlePath);
                     chapter.DisplaySceneBundle = chapter.ResolvedSceneBundle;
                     return true;
@@ -283,7 +526,7 @@ namespace DivineDragon.MapTools
             return false;
         }
 
-        private bool TryAddTerrainBundle(ChapterRecord chapter, List<string> extractionTargets)
+        private bool TryAddTerrainBundle(ChapterRecord chapter, List<string> extractionTargets, HashSet<string> queued = null)
         {
             string suffix = GetChapterSuffix(chapter.Cid);
             if (string.IsNullOrEmpty(suffix))
@@ -296,7 +539,10 @@ namespace DivineDragon.MapTools
                 string bundlePath = $"{MapToolsPaths.TerrainDirectory}/mapterrain_{candidate}.bundle";
                 if (File.Exists(bundlePath))
                 {
-                    extractionTargets.Add(bundlePath);
+                    if (queued == null || queued.Add(bundlePath))
+                    {
+                        extractionTargets.Add(bundlePath);
+                    }
                     chapter.ResolvedTerrainBundle = Path.GetFileName(bundlePath);
                     chapter.DisplayTerrainBundle = chapter.ResolvedTerrainBundle;
                     return true;
@@ -305,7 +551,7 @@ namespace DivineDragon.MapTools
             return false;
         }
 
-        private bool TryAddDisposBundle(ChapterRecord chapter, List<string> extractionTargets)
+        private bool TryAddDisposBundle(ChapterRecord chapter, List<string> extractionTargets, HashSet<string> queued = null)
         {
             string suffix = GetChapterSuffix(chapter.Cid);
             if (string.IsNullOrEmpty(suffix))
@@ -318,7 +564,10 @@ namespace DivineDragon.MapTools
                 string bundlePath = $"{MapToolsPaths.DisposDirectory}/{candidate}.xml.bundle";
                 if (File.Exists(bundlePath))
                 {
-                    extractionTargets.Add(bundlePath);
+                    if (queued == null || queued.Add(bundlePath))
+                    {
+                        extractionTargets.Add(bundlePath);
+                    }
                     chapter.ResolvedDisposBundle = Path.GetFileName(bundlePath);
                     chapter.DisplayDisposBundle = chapter.ResolvedDisposBundle;
                     return true;
@@ -399,7 +648,6 @@ namespace DivineDragon.MapTools
         {
             chapters.Clear();
             chapterLoadError = null;
-            selectedIndex = -1;
 
             if (string.IsNullOrEmpty(chapterAssetPath))
             {
@@ -605,6 +853,8 @@ namespace DivineDragon.MapTools
             public string ResolvedSceneBundle;
             public string ResolvedTerrainBundle;
             public string ResolvedDisposBundle;
+
+            public bool Checked;
         }
 
         private readonly struct SupportAsset
