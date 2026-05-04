@@ -77,6 +77,23 @@ namespace DivineDragon.MapTools
 
         internal static Color GetColorOrFallback(string tid)
         {
+            // Editor-only overrides win when present so tiles that share an in-game color can be
+            // visually distinguished without touching shipping data.
+            if (TileColorOverridesProvider.TryGetOverride(tid, out Color overrideColor))
+            {
+                return overrideColor;
+            }
+            return TryGetTerrain(tid, out TerrainType terrain)
+                ? terrain.color
+                : GenerateFallbackColor(tid);
+        }
+
+        /// <summary>
+        /// In-game color for a terrain, ignoring editor-only overrides. Used by UI that wants
+        /// to show "what the override is replacing".
+        /// </summary>
+        internal static Color GetOriginalColorOrFallback(string tid)
+        {
             return TryGetTerrain(tid, out TerrainType terrain)
                 ? terrain.color
                 : GenerateFallbackColor(tid);

@@ -1190,14 +1190,12 @@ namespace DivineDragon.MapTools
                         paintMode = !paintMode;
                         if (paintMode)
                         {
-                            // Make sure we have a default terrain selected
+                            // Make sure we have a default terrain selected. Prefer Ground when
+                            // available — paintableTerrains[0] is just whatever's first in the
+                            // XML (TID_OffLimits in stock data) which is a confusing default.
                             if (IsEmptyTerrain(selectedBrushTerrain))
                             {
-                                var paintableTerrains = GetPaintableTerrains();
-                                if (paintableTerrains.Count > 0)
-                                {
-                                    selectedBrushTerrain = paintableTerrains[0].tid;
-                                }
+                                selectedBrushTerrain = ChooseDefaultBrushTerrain();
                             }
                         }
                         SceneView.RepaintAll();
@@ -3306,9 +3304,9 @@ namespace DivineDragon.MapTools
                 EditorGUI.DrawRect(rowRect, highlight);
             }
             
-            // Draw color swatch
+            // Draw color swatch — route through GetColorOrFallback so editor-only overrides apply
             Rect colorRect = GUILayoutUtility.GetRect(20, 20, GUILayout.Width(20));
-            EditorGUI.DrawRect(colorRect, terrain.color);
+            EditorGUI.DrawRect(colorRect, TerrainDefinitions.GetColorOrFallback(terrain.tid));
             EditorGUI.DrawRect(colorRect, new Color(0, 0, 0, 0.2f)); // Border
             
             if (showUsageIndicator)
@@ -3472,6 +3470,42 @@ namespace DivineDragon.MapTools
             }
 
             SetSelectedTerrain(adapter);
+        }
+
+        // TIDs are Japanese in the shipped XML; "Ground" labels are MSBT-localized. TID_平地
+        // (Heichi, "plain") is the canonical neutral floor tile. TID_草原 (grassland) is a fine
+        // backup when 平地 isn't present.
+        private static readonly string[] PreferredDefaultBrushTids = { "TID_平地", "TID_草原" };
+
+        private static string ChooseDefaultBrushTerrain()
+        {
+            var paintable = GetPaintableTerrains();
+            if (paintable.Count == 0) return string.Empty;
+
+            for (int p = 0; p < PreferredDefaultBrushTids.Length; p++)
+            {
+                string preferred = PreferredDefaultBrushTids[p];
+                for (int i = 0; i < paintable.Count; i++)
+                {
+                    if (string.Equals(paintable[i].tid, preferred, StringComparison.Ordinal))
+                    {
+                        return paintable[i].tid;
+                    }
+                }
+            }
+
+            // Preferred TIDs aren't in the loaded set — fall back to the first paintable terrain
+            // that isn't an Off-Limits variant so we don't startle the user with TID_進入不可.
+            for (int i = 0; i < paintable.Count; i++)
+            {
+                string tid = paintable[i].tid;
+                if (!string.IsNullOrEmpty(tid) && !tid.StartsWith("TID_進入不可", StringComparison.Ordinal))
+                {
+                    return tid;
+                }
+            }
+
+            return paintable[0].tid;
         }
 
         private static List<TerrainType> GetPaintableTerrains()

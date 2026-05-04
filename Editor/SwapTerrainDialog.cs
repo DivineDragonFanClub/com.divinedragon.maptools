@@ -169,8 +169,8 @@ namespace DivineDragon.MapTools
                 EditorGUI.DrawRect(rowRect, bgColor);
             }
 
-            // Color chip
-            DrawColorChip(t.color);
+            // Color chip — uses GetColorOrFallback so editor-only overrides apply here too
+            DrawColorChip(TerrainDefinitions.GetColorOrFallback(t.tid));
 
             // Label
             GUIStyle labelStyle = isSelected ? EditorStyles.boldLabel : EditorStyles.label;
