@@ -13,15 +13,31 @@ namespace DivineDragon.MapTools
     {
         private const string WindowTitle = "Chapter Dumper";
 
-        // Supporting XML bundles to stage alongside map dumps if not already imported
-        private static SupportAsset[] GetSupportingAssets() => new[]
+        // Supporting bundles to stage alongside map dumps if not already imported.
+        // XML bundles are language-agnostic; patch MSBT bundles are tied to the user's
+        // current localization language so DLC chapter titles resolve after dumping.
+        private static IEnumerable<SupportAsset> GetSupportingAssets()
         {
-            new SupportAsset(MapToolsPaths.GameDataShareAssetPath + "/Person.xml", MapToolsPaths.GameDataAssetRoot + "/person.xml.bundle"),
-            new SupportAsset(MapToolsPaths.GameDataShareAssetPath + "/Job.xml", MapToolsPaths.GameDataAssetRoot + "/job.xml.bundle"),
-            new SupportAsset(MapToolsPaths.GameDataShareAssetPath + "/Item.xml", MapToolsPaths.GameDataAssetRoot + "/item.xml.bundle"),
-            new SupportAsset(MapToolsPaths.GameDataShareAssetPath + "/Skill.xml", MapToolsPaths.GameDataAssetRoot + "/skill.xml.bundle"),
-            new SupportAsset(TerrainDefinitions.TerrainXmlAssetRelativePath, MapToolsPaths.TerrainXmlBundlePath)
-        };
+            yield return new SupportAsset(MapToolsPaths.GameDataShareAssetPath + "/Person.xml", MapToolsPaths.GameDataAssetRoot + "/person.xml.bundle");
+            yield return new SupportAsset(MapToolsPaths.GameDataShareAssetPath + "/Job.xml", MapToolsPaths.GameDataAssetRoot + "/job.xml.bundle");
+            yield return new SupportAsset(MapToolsPaths.GameDataShareAssetPath + "/Item.xml", MapToolsPaths.GameDataAssetRoot + "/item.xml.bundle");
+            yield return new SupportAsset(MapToolsPaths.GameDataShareAssetPath + "/Skill.xml", MapToolsPaths.GameDataAssetRoot + "/skill.xml.bundle");
+            yield return new SupportAsset(TerrainDefinitions.TerrainXmlAssetRelativePath, MapToolsPaths.TerrainXmlBundlePath);
+
+            string lang = TerrainLocalizer.CurrentLanguage;
+            if (!string.IsNullOrEmpty(lang) && lang.Length >= 2)
+            {
+                string country = lang.Substring(0, 2).ToUpperInvariant();
+                string langLower = lang.ToLowerInvariant();
+                string countryLower = country.ToLowerInvariant();
+                for (int patchN = 0; patchN <= 3; patchN++)
+                {
+                    yield return new SupportAsset(
+                        $"Assets/Share/Addressables/Patch/Patch{patchN}/Message/{country}/{lang}/Patch{patchN}.bytes",
+                        $"{MapToolsPaths.MessageAssetRoot}/{countryLower}/{langLower}/patch{patchN}.bytes.bundle");
+                }
+            }
+        }
 
         private readonly List<ChapterRecord> chapters = new List<ChapterRecord>();
 
@@ -32,15 +48,18 @@ namespace DivineDragon.MapTools
         private Vector2 listScroll;
         private bool isDragChecking;
         private bool dragCheckValue;
+        private bool showAdvancedColumns;
 
         private const float RowHeight = 20f;
         private const float ColumnCheckboxWidth = 22f;
+        private const float ColumnDumpedWidth = 64f;
         private const float ColumnCidWidth = 110f;
         private const float ColumnSceneWidth = 160f;
         private const float ColumnTerrainWidth = 180f;
-        private const float ColumnDisposWidth = 140f;
         private const int ExtractionBatchSize = 10;
         private const string SkipBulkWarningPrefsKey = "DivineDragon.MapTools.ChapterDumper.SkipBulkWarning";
+        private const string ShowAdvancedColumnsPrefsKey = "DivineDragon.MapTools.ChapterDumper.ShowAdvancedColumns";
+        private const string AddressablesRootFolder = "Assets/Share/Addressables";
 
         [MenuItem("Window/Map Tools/Chapter Dumper")]
         public static void ShowWindow()
@@ -51,13 +70,36 @@ namespace DivineDragon.MapTools
 
         private void OnEnable()
         {
+            showAdvancedColumns = EditorPrefs.GetBool(ShowAdvancedColumnsPrefsKey, false);
             RefreshChapterLocation();
             TerrainLocalizer.OnLanguageChanged += OnLanguageChanged;
+            EditorApplication.projectChanged += OnProjectChanged;
         }
 
         private void OnDisable()
         {
             TerrainLocalizer.OnLanguageChanged -= OnLanguageChanged;
+            EditorApplication.projectChanged -= OnProjectChanged;
+        }
+
+        private void OnProjectChanged()
+        {
+            TerrainLocalizer.InvalidateCache();
+            RefreshTitles();
+            RefreshDumpStatus();
+            Repaint();
+        }
+
+        private void RefreshTitles()
+        {
+            for (int i = 0; i < chapters.Count; i++)
+            {
+                string newTitle = GetLocalizedChapterTitle(chapters[i].Cid);
+                if (!string.IsNullOrEmpty(newTitle))
+                {
+                    chapters[i].Title = newTitle;
+                }
+            }
         }
 
         private void OnLanguageChanged()
@@ -189,11 +231,14 @@ namespace DivineDragon.MapTools
                     }
                 }
 
+                GUILayout.Label("Dumped", EditorStyles.boldLabel, GUILayout.Width(ColumnDumpedWidth));
                 GUILayout.Label("CID", EditorStyles.boldLabel, GUILayout.Width(ColumnCidWidth));
                 GUILayout.Label("Title", EditorStyles.boldLabel);
-                GUILayout.Label("Scene Bundle", EditorStyles.boldLabel, GUILayout.Width(ColumnSceneWidth));
-                GUILayout.Label("Terrain Bundle", EditorStyles.boldLabel, GUILayout.Width(ColumnTerrainWidth));
-                GUILayout.Label("Dispos Bundle", EditorStyles.boldLabel, GUILayout.Width(ColumnDisposWidth));
+                if (showAdvancedColumns)
+                {
+                    GUILayout.Label("Scene Bundle", EditorStyles.boldLabel, GUILayout.Width(ColumnSceneWidth));
+                    GUILayout.Label("Terrain Bundle", EditorStyles.boldLabel, GUILayout.Width(ColumnTerrainWidth));
+                }
             }
         }
 
@@ -209,7 +254,8 @@ namespace DivineDragon.MapTools
             float x = rowRect.x + 4f;
             float y = rowRect.y + 2f;
             float height = rowRect.height - 4f;
-            float titleWidth = rowRect.width - ColumnCheckboxWidth - ColumnCidWidth - ColumnSceneWidth - ColumnTerrainWidth - ColumnDisposWidth - 20f;
+            float titleWidth = rowRect.width - ColumnCheckboxWidth - ColumnDumpedWidth - ColumnCidWidth - 20f;
+            if (showAdvancedColumns) titleWidth -= ColumnSceneWidth + ColumnTerrainWidth;
             if (titleWidth < 60f)
             {
                 titleWidth = 60f;
@@ -222,19 +268,106 @@ namespace DivineDragon.MapTools
             EditorGUI.Toggle(checkboxRect, chapter.Checked);
             x += ColumnCheckboxWidth;
 
+            // Whole-row click target for dumped chapters (everything to the right of the checkbox).
+            if (chapter.IsDumped)
+            {
+                Rect rowClickRect = new Rect(rowRect.x + ColumnCheckboxWidth, rowRect.y, rowRect.width - ColumnCheckboxWidth, rowRect.height);
+                EditorGUIUtility.AddCursorRect(rowClickRect, MouseCursor.Link);
+
+                if (Event.current.type == EventType.MouseDown &&
+                    Event.current.button == 0 &&
+                    rowClickRect.Contains(Event.current.mousePosition))
+                {
+                    string targetPath = !string.IsNullOrEmpty(chapter.SceneAtPath) ? chapter.SceneAtPath : chapter.DumpedAtPath;
+                    var asset = AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(targetPath);
+                    if (asset != null)
+                    {
+                        EditorGUIUtility.PingObject(asset);
+                        Selection.activeObject = asset;
+                    }
+                    Event.current.Use();
+                }
+
+                Color prev = GUI.color;
+                GUI.color = new Color(0.4f, 0.85f, 0.4f);
+                GUI.Label(new Rect(x, y, ColumnDumpedWidth, height), "✓", labelStyle);
+                GUI.color = prev;
+            }
+            x += ColumnDumpedWidth;
+
             GUI.Label(new Rect(x, y, ColumnCidWidth - 4f, height), chapter.Cid ?? "", labelStyle);
             x += ColumnCidWidth;
 
             GUI.Label(new Rect(x, y, titleWidth, height), chapter.Title ?? string.Empty, labelStyle);
             x += titleWidth + 4f;
 
-            GUI.Label(new Rect(x, y, ColumnSceneWidth, height), chapter.DisplaySceneBundle ?? string.Empty, labelStyle);
-            x += ColumnSceneWidth;
+            if (showAdvancedColumns)
+            {
+                GUI.Label(new Rect(x, y, ColumnSceneWidth, height), chapter.DisplaySceneBundle ?? string.Empty, labelStyle);
+                x += ColumnSceneWidth;
 
-            GUI.Label(new Rect(x, y, ColumnTerrainWidth, height), chapter.DisplayTerrainBundle ?? string.Empty, labelStyle);
-            x += ColumnTerrainWidth;
+                GUI.Label(new Rect(x, y, ColumnTerrainWidth, height), chapter.DisplayTerrainBundle ?? string.Empty, labelStyle);
+            }
+        }
 
-            GUI.Label(new Rect(x, y, ColumnDisposWidth, height), chapter.DisplayDisposBundle ?? string.Empty, labelStyle);
+        private void RefreshDumpStatus()
+        {
+            Dictionary<string, string> dumpedTerrains = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            string projectRoot = ProjectRootPath();
+            string addressablesRoot = Path.Combine(projectRoot, AddressablesRootFolder).Replace("\\", "/");
+            if (Directory.Exists(addressablesRoot))
+            {
+                foreach (string file in Directory.EnumerateFiles(addressablesRoot, "MapTerrain_*.asset", SearchOption.AllDirectories))
+                {
+                    string normalized = file.Replace("\\", "/");
+                    string projectRelative = normalized.StartsWith(projectRoot + "/")
+                        ? normalized.Substring(projectRoot.Length + 1)
+                        : normalized;
+                    string fileName = Path.GetFileName(file);
+                    if (!dumpedTerrains.ContainsKey(fileName))
+                    {
+                        dumpedTerrains[fileName] = projectRelative;
+                    }
+                }
+            }
+
+            // Reverse index: which scene references each MapTerrain asset.
+            Dictionary<string, string> terrainToScene = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string sceneGuid in AssetDatabase.FindAssets("t:SceneAsset"))
+            {
+                string scenePath = AssetDatabase.GUIDToAssetPath(sceneGuid);
+                if (string.IsNullOrEmpty(scenePath)) continue;
+                foreach (string dep in AssetDatabase.GetDependencies(scenePath, recursive: false))
+                {
+                    if (dep.EndsWith(".asset", StringComparison.OrdinalIgnoreCase) &&
+                        Path.GetFileName(dep).StartsWith("MapTerrain_", StringComparison.OrdinalIgnoreCase) &&
+                        !terrainToScene.ContainsKey(dep))
+                    {
+                        terrainToScene[dep] = scenePath;
+                    }
+                }
+            }
+
+            for (int i = 0; i < chapters.Count; i++)
+            {
+                ChapterRecord chapter = chapters[i];
+                chapter.IsDumped = false;
+                chapter.DumpedAtPath = null;
+                chapter.SceneAtPath = null;
+                string suffix = GetChapterSuffix(chapter.Cid);
+                if (string.IsNullOrEmpty(suffix)) continue;
+                foreach (string candidate in GenerateSuffixCandidates(suffix))
+                {
+                    if (dumpedTerrains.TryGetValue($"MapTerrain_{candidate}.asset", out string path))
+                    {
+                        chapter.IsDumped = true;
+                        chapter.DumpedAtPath = path;
+                        terrainToScene.TryGetValue(path, out string scenePath);
+                        chapter.SceneAtPath = scenePath;
+                        break;
+                    }
+                }
+            }
         }
 
         private void ShowSettingsMenu()
@@ -255,6 +388,16 @@ namespace DivineDragon.MapTools
                     {
                         EditorPrefs.SetBool(SkipBulkWarningPrefsKey, true);
                     }
+                });
+
+            menu.AddItem(
+                new GUIContent("Show advanced columns"),
+                showAdvancedColumns,
+                () =>
+                {
+                    showAdvancedColumns = !showAdvancedColumns;
+                    EditorPrefs.SetBool(ShowAdvancedColumnsPrefsKey, showAdvancedColumns);
+                    Repaint();
                 });
 
             menu.ShowAsContext();
@@ -319,7 +462,6 @@ namespace DivineDragon.MapTools
 
             int sceneFound = 0, sceneMissing = 0;
             int terrainFound = 0, terrainMissing = 0;
-            int disposFound = 0, disposMissing = 0;
             int chaptersWithAnyTargets = 0;
             bool overallSuccess = true;
 
@@ -373,17 +515,6 @@ namespace DivineDragon.MapTools
                         warnings.Add($"Terrain bundle missing for {chapter.Cid}.");
                     }
 
-                    if (TryAddDisposBundle(chapter, batchTargets, queuedPaths))
-                    {
-                        disposFound++;
-                        chapterHasBundle = true;
-                    }
-                    else
-                    {
-                        disposMissing++;
-                        warnings.Add($"Dispos bundle missing for {chapter.Cid}.");
-                    }
-
                     if (chapterHasBundle)
                     {
                         chaptersWithAnyTargets++;
@@ -425,7 +556,7 @@ namespace DivineDragon.MapTools
 
                 string statusMessage =
                     $"Queued {queuedPaths.Count} unique bundles across {chaptersWithAnyTargets} chapters.\n" +
-                    $"Scenes: {sceneFound} found, {sceneMissing} missing. Terrains: {terrainFound} found, {terrainMissing} missing. Dispos: {disposFound} found, {disposMissing} missing.";
+                    $"Scenes: {sceneFound} found, {sceneMissing} missing. Terrains: {terrainFound} found, {terrainMissing} missing.";
 
                 if (!overallSuccess)
                 {
@@ -545,31 +676,6 @@ namespace DivineDragon.MapTools
                     }
                     chapter.ResolvedTerrainBundle = Path.GetFileName(bundlePath);
                     chapter.DisplayTerrainBundle = chapter.ResolvedTerrainBundle;
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        private bool TryAddDisposBundle(ChapterRecord chapter, List<string> extractionTargets, HashSet<string> queued = null)
-        {
-            string suffix = GetChapterSuffix(chapter.Cid);
-            if (string.IsNullOrEmpty(suffix))
-            {
-                return false;
-            }
-
-            foreach (string candidate in GenerateSuffixCandidates(suffix))
-            {
-                string bundlePath = $"{MapToolsPaths.DisposDirectory}/{candidate}.xml.bundle";
-                if (File.Exists(bundlePath))
-                {
-                    if (queued == null || queued.Add(bundlePath))
-                    {
-                        extractionTargets.Add(bundlePath);
-                    }
-                    chapter.ResolvedDisposBundle = Path.GetFileName(bundlePath);
-                    chapter.DisplayDisposBundle = chapter.ResolvedDisposBundle;
                     return true;
                 }
             }
@@ -697,6 +803,7 @@ namespace DivineDragon.MapTools
                     chapters.Add(record);
                 }
 
+                RefreshDumpStatus();
             }
             catch (Exception ex)
             {
@@ -733,18 +840,6 @@ namespace DivineDragon.MapTools
                     }
                 }
 
-                string displayDispos = null;
-                foreach (string candidate in GenerateSuffixCandidates(suffix))
-                {
-                    string fileName = $"{candidate}.xml.bundle";
-                    string fullPath = Path.Combine(MapToolsPaths.DisposDirectory, fileName).Replace("\\", "/");
-                    if (File.Exists(fullPath))
-                    {
-                        displayDispos = fileName;
-                        break;
-                    }
-                }
-
                 record.DisplaySceneBundle = !string.IsNullOrEmpty(displayScene)
                     ? displayScene
                     : (!string.IsNullOrEmpty(record.RawField) && record.RawField != "*"
@@ -756,14 +851,11 @@ namespace DivineDragon.MapTools
                     : (!string.IsNullOrEmpty(record.RawTerrain) && record.RawTerrain != "*"
                         ? record.RawTerrain
                         : null);
-
-                record.DisplayDisposBundle = displayDispos;
             }
             else
             {
                 record.DisplaySceneBundle = record.RawField;
                 record.DisplayTerrainBundle = record.RawTerrain;
-                record.DisplayDisposBundle = null;
             }
         }
 
@@ -849,12 +941,13 @@ namespace DivineDragon.MapTools
 
             public string DisplaySceneBundle;
             public string DisplayTerrainBundle;
-            public string DisplayDisposBundle;
             public string ResolvedSceneBundle;
             public string ResolvedTerrainBundle;
-            public string ResolvedDisposBundle;
 
             public bool Checked;
+            public bool IsDumped;
+            public string DumpedAtPath;
+            public string SceneAtPath;
         }
 
         private readonly struct SupportAsset

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using DivineDragon.Msbt;
 using UnityEditor;
 using UnityEngine;
 
@@ -14,6 +15,7 @@ namespace DivineDragon.MapTools
     {
         private const string PREFS_LANGUAGE = "TerrainLocalizer_Language";
         private const string MESSAGE_RELATIVE_PATH = "Share/Addressables/Message";
+        private const string PATCH_RELATIVE_PATH = "Share/Addressables/Patch";
         private const string DEFAULT_LANGUAGE = "USen";
 
         private static Dictionary<string, string> localizedNames;
@@ -155,6 +157,48 @@ namespace DivineDragon.MapTools
             }
 
             ParseScriptFile(gameDataPath);
+            LoadPatchMsbts(lang);
+        }
+
+        // Walk Assets/Share/Addressables/Patch/*/Message/<country>/<lang>/*.bytes and
+        // merge each MSBT's entries into localizedNames via the msbt package. Patch
+        // entries take precedence over base on key collision, matching shipping behavior.
+        private static void LoadPatchMsbts(string lang)
+        {
+            string assetsPath = Application.dataPath;
+            string patchRoot = Path.Combine(assetsPath, PATCH_RELATIVE_PATH).Replace("\\", "/");
+            if (!Directory.Exists(patchRoot))
+            {
+                return;
+            }
+
+            foreach (string patchDir in Directory.GetDirectories(patchRoot))
+            {
+                string messageDir = Path.Combine(patchDir, "Message").Replace("\\", "/");
+                if (!Directory.Exists(messageDir)) continue;
+
+                foreach (string countryDir in Directory.GetDirectories(messageDir))
+                {
+                    string langDir = Path.Combine(countryDir, lang).Replace("\\", "/");
+                    if (!Directory.Exists(langDir)) continue;
+
+                    foreach (string bytesFile in Directory.GetFiles(langDir, "*.bytes"))
+                    {
+                        try
+                        {
+                            MessageBundle bundle = MessageBundle.Load(bytesFile);
+                            foreach (var entry in bundle.ExtractEntriesAsText())
+                            {
+                                localizedNames[entry.Key] = entry.Value;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Debug.LogWarning($"[TerrainLocalizer] Failed to load patch MSBT {bytesFile}: {ex.Message}");
+                        }
+                    }
+                }
+            }
         }
 
         private static void ParseScriptFile(string path)

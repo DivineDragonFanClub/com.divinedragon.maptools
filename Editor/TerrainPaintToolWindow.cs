@@ -526,6 +526,7 @@ namespace DivineDragon.MapTools
         private static void OnActiveSceneChanged(Scene previousScene, Scene newScene)
         {
             InvalidateTerrainHeightCache(null);
+            LoadTerrainFromActiveScene(silentIfNotFound: true);
             SceneView.RepaintAll();
         }
 
@@ -3349,12 +3350,15 @@ namespace DivineDragon.MapTools
             EditorGUILayout.EndHorizontal();
         }
 
-        private static void LoadTerrainFromActiveScene()
+        private static void LoadTerrainFromActiveScene(bool silentIfNotFound = false)
         {
             MonoBehaviour target = FindMapSettingComponent();
             if (target == null)
             {
-                Debug.LogWarning("[TerrainPaintTool] MapSetting component was not found in the active scene.");
+                if (!silentIfNotFound)
+                {
+                    Debug.LogWarning("[TerrainPaintTool] MapSetting component was not found in the active scene.");
+                }
                 return;
             }
 
@@ -3381,7 +3385,10 @@ namespace DivineDragon.MapTools
                 }
             }
 
-            Debug.LogWarning("[TerrainPaintTool] MapSetting component found but no MapTerrain reference assigned.");
+            if (!silentIfNotFound)
+            {
+                Debug.LogWarning("[TerrainPaintTool] MapSetting component found but no MapTerrain reference assigned.");
+            }
         }
 
         private static MonoBehaviour FindMapSettingComponent()

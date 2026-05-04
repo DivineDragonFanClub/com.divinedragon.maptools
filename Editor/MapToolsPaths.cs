@@ -12,9 +12,9 @@ namespace DivineDragon.MapTools
         public static string GameBuildPath => EngageAddressableSettings.GameBuildPath;
         public static string GameDataAssetRoot => GameBuildPath + "/fe_assets_gamedata";
         public static string TerrainDirectory => GameDataAssetRoot + "/terrains";
-        public static string DisposDirectory => GameDataAssetRoot + "/dispos";
         public static string TerrainXmlBundlePath => GameDataAssetRoot + "/terrain.xml.bundle";
         public static string ChapterBundlePath => GameDataAssetRoot + "/chapter.xml.bundle";
+        public static string MessageAssetRoot => GameBuildPath + "/fe_assets_message";
 
         // Project asset paths (constant)
         public const string GameDataShareAssetPath = "Assets/Share/Addressables/Patch/Patch3/GameData";
