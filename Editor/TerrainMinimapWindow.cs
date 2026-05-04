@@ -35,6 +35,10 @@ namespace DivineDragon.MapTools
         private bool isDraggingMinimap;
         private bool isMinimapSampleMode; // true when Ctrl/Cmd held while hovering minimap
         private Vector2 lastDragTile = new Vector2(float.MinValue, float.MinValue);
+        private Vector2[] cachedFrustumCorners; // absolute screen coords; null when invalid
+        private bool isGrabPanning;
+        private Vector3 grabStartCursorWorld;
+        private Vector3 grabStartPivot;
         private bool naturalScroll = false;
         private MinimapGridMode gridMode = MinimapGridMode.None;
 
@@ -325,6 +329,7 @@ namespace DivineDragon.MapTools
             if (!centerHit.HasValue)
             {
                 // Camera not looking at terrain - show crosshair at pivot
+                cachedFrustumCorners = null;
                 GUI.BeginClip(minimapRect);
                 Vector2 pivotLocal = WorldToMinimapLocal(sv.pivot, minimapRect);
                 DrawCrosshairLocal(pivotLocal, minimapRect.size);
@@ -411,6 +416,7 @@ namespace DivineDragon.MapTools
             if (!allValid)
             {
                 // Fallback: show pivot as crosshair
+                cachedFrustumCorners = null;
                 GUI.BeginClip(minimapRect);
                 Vector2 pivotLocal = WorldToMinimapLocal(sv.pivot, minimapRect);
                 DrawCrosshairLocal(pivotLocal, minimapRect.size);
@@ -427,6 +433,7 @@ namespace DivineDragon.MapTools
                     minimapRect.y + Mathf.Clamp(corners[i].y, 0, minimapRect.height)
                 );
             }
+            cachedFrustumCorners = absCorners;
 
             // Draw quadrilateral
             Color frustumColor = new Color(1f, 1f, 0f, 0.9f);
@@ -436,6 +443,25 @@ namespace DivineDragon.MapTools
             DrawLineLocal(absCorners[1], absCorners[2], frustumColor, thickness);
             DrawLineLocal(absCorners[2], absCorners[3], frustumColor, thickness);
             DrawLineLocal(absCorners[3], absCorners[0], frustumColor, thickness);
+        }
+
+        // Convex-quad point-in-polygon: cursor is inside iff it's on the same side
+        // of every edge (consistent cross-product sign).
+        private static bool PointInQuad(Vector2 p, Vector2[] q)
+        {
+            if (q == null || q.Length != 4) return false;
+            int sign = 0;
+            for (int i = 0; i < 4; i++)
+            {
+                Vector2 a = q[i];
+                Vector2 b = q[(i + 1) % 4];
+                float cross = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+                int s = cross > 0f ? 1 : (cross < 0f ? -1 : 0);
+                if (s == 0) continue;
+                if (sign == 0) sign = s;
+                else if (sign != s) return false;
+            }
+            return true;
         }
 
         private void DrawHoverHighlight(Rect minimapRect)
@@ -742,7 +768,7 @@ namespace DivineDragon.MapTools
 
             bool mouseInside = minimapRect.Contains(mousePos);
 
-            if (!mouseInside && !isDraggingMinimap)
+            if (!mouseInside && !isDraggingMinimap && !isGrabPanning)
             {
                 hoveredTile = new Vector2Int(-1, -1);
                 hoveredTerrainTid = null;
@@ -810,28 +836,61 @@ namespace DivineDragon.MapTools
                 }
                 else if (isCurrentMapMode)
                 {
-                    // Jump camera to tile and start drag-pan (only in current map mode)
-                    JumpToTile(worldTileXFloat, worldTileYFloat);
-                    isDraggingMinimap = true;
-                    lastDragTile = new Vector2(worldTileXFloat, worldTileYFloat);
-                    e.Use();
+                    if (cachedFrustumCorners != null && PointInQuad(mousePos, cachedFrustumCorners))
+                    {
+                        // Click inside the frustum: grab and pan relatively (no jump).
+                        var sv = SceneView.lastActiveSceneView;
+                        if (sv != null)
+                        {
+                            grabStartCursorWorld = MinimapCursorToWorld(worldTileXFloat, worldTileYFloat);
+                            grabStartPivot = sv.pivot;
+                            isGrabPanning = true;
+                            e.Use();
+                        }
+                    }
+                    else
+                    {
+                        // Click outside the frustum: jump camera to tile, then drag-pan to follow cursor.
+                        JumpToTile(worldTileXFloat, worldTileYFloat);
+                        isDraggingMinimap = true;
+                        lastDragTile = new Vector2(worldTileXFloat, worldTileYFloat);
+                        e.Use();
+                    }
                 }
             }
 
-            if (e.type == EventType.MouseDrag && isDraggingMinimap && e.button == 0 && isCurrentMapMode)
+            if (e.type == EventType.MouseDrag && e.button == 0 && isCurrentMapMode)
             {
-                Vector2 current = new Vector2(worldTileXFloat, worldTileYFloat);
-                if (!Mathf.Approximately(current.x, lastDragTile.x) || !Mathf.Approximately(current.y, lastDragTile.y))
+                if (isGrabPanning)
                 {
-                    JumpToTile(worldTileXFloat, worldTileYFloat);
-                    lastDragTile = current;
+                    var sv = SceneView.lastActiveSceneView;
+                    if (sv != null)
+                    {
+                        Vector3 currentCursorWorld = MinimapCursorToWorld(worldTileXFloat, worldTileYFloat);
+                        Vector3 worldDelta = currentCursorWorld - grabStartCursorWorld;
+                        Vector3 target = grabStartPivot + new Vector3(worldDelta.x, 0f, worldDelta.z);
+                        const float dragLerp = 0.35f;
+                        sv.pivot = Vector3.Lerp(sv.pivot, target, dragLerp);
+                        sv.Repaint();
+                    }
+                    e.Use();
                 }
-                e.Use();
+                else if (isDraggingMinimap)
+                {
+                    Vector2 current = new Vector2(worldTileXFloat, worldTileYFloat);
+                    if (!Mathf.Approximately(current.x, lastDragTile.x) || !Mathf.Approximately(current.y, lastDragTile.y))
+                    {
+                        JumpToTile(worldTileXFloat, worldTileYFloat);
+                        lastDragTile = current;
+                    }
+                    e.Use();
+                }
             }
 
             if (e.type == EventType.MouseUp && e.button == 0)
             {
                 isDraggingMinimap = false;
+                isGrabPanning = false;
                 lastDragTile = new Vector2(float.MinValue, float.MinValue);
             }
 
@@ -854,6 +913,14 @@ namespace DivineDragon.MapTools
             newSize = Mathf.Clamp(newSize, MIN_ORTHO_SIZE, MAX_ORTHO_SIZE);
             sv.size = newSize;
             sv.Repaint();
+        }
+
+        private Vector3 MinimapCursorToWorld(float worldTileXFloat, float worldTileYFloat)
+        {
+            Vector3 offset = TerrainPaintToolWindow.GetWorldOffset();
+            float worldX = terrain.m_X + offset.x + worldTileXFloat * TILE_SIZE;
+            float worldZ = terrain.m_Z + offset.z + worldTileYFloat * TILE_SIZE;
+            return new Vector3(worldX, 0f, worldZ);
         }
 
         private void JumpToTile(float tileX, float tileY)
