@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEditor;
 using UnityEngine;
 
@@ -420,23 +421,13 @@ namespace DivineDragon.MapTools
             float pitchRad = Mathf.Abs(pitchDeg) * Mathf.Deg2Rad;
             float halfFovRad = cam.fieldOfView * 0.5f * Mathf.Deg2Rad;
 
-            // Natural multiplier: ratio of corner distance to center distance
+            // Natural multiplier: ratio of corner distance to center distance.
+            // Floor the denominator so the formula stays continuous across all pitches; the
+            // Clamp below already enforces the safety bound that the previous else-branch was
+            // doing discretely (causing a visible jump as pitch crossed the 0.15 rad threshold).
             float topCornerAngle = pitchRad - halfFovRad;
-            float autoMultiplier;
-
-            if (topCornerAngle > 0.15f) // ~8.5 degrees, safe from division issues
-            {
-                autoMultiplier = Mathf.Sin(pitchRad) / Mathf.Sin(topCornerAngle);
-                // Reduce slightly to match perception (geometric is too generous)
-                autoMultiplier *= 0.85f;
-            }
-            else
-            {
-                // Very shallow angle - cap it
-                autoMultiplier = 2.0f;
-            }
-
-            // Clamp to reasonable range
+            float safeTopAngle = Mathf.Max(topCornerAngle, 0.15f);
+            float autoMultiplier = Mathf.Sin(pitchRad) / Mathf.Sin(safeTopAngle) * 0.85f;
             autoMultiplier = Mathf.Clamp(autoMultiplier, 1.1f, 2.5f);
 
             float centerDistance = Vector3.Distance(camPos, centerHit.Value);
@@ -454,71 +445,151 @@ namespace DivineDragon.MapTools
             };
 
             Vector2[] corners = new Vector2[4];
-            bool allValid = true;
 
             for (int i = 0; i < 4; i++)
             {
                 Ray ray = cam.ViewportPointToRay(viewportCorners[i]);
                 Vector3? hit = RayPlaneIntersect(ray, terrainY);
 
+                Vector3 finalHit;
                 if (hit.HasValue)
                 {
                     // Clamp hit point if too far from camera
                     float hitDistance = Vector3.Distance(camPos, hit.Value);
-                    Vector3 finalHit;
-
                     if (hitDistance > maxDistance)
                     {
-                        // Clamp: project point at maxDistance along the ray direction
                         Vector3 rayDir = (hit.Value - camPos).normalized;
                         finalHit = camPos + rayDir * maxDistance;
-                        // Set Y to terrain plane
                         finalHit.y = terrainY;
                     }
                     else
                     {
                         finalHit = hit.Value;
                     }
-
-                    corners[i] = WorldToMinimapLocal(finalHit, minimapRect);
                 }
                 else
                 {
-                    allValid = false;
-                    break;
+                    // Ray doesn't hit the terrain plane (horizontal or pointing above-horizon
+                    // when the camera pitch is shallower than half-FOV). Synthesize a corner
+                    // by walking maxDistance along the ray and dropping onto the plane — this
+                    // keeps the quad continuous as top corners cross the horizon, instead of
+                    // flickering to a crosshair fallback for one frame.
+                    finalHit = camPos + ray.direction.normalized * maxDistance;
+                    finalHit.y = terrainY;
                 }
+
+                corners[i] = WorldToMinimapLocal(finalHit, minimapRect);
             }
 
-            if (!allValid)
-            {
-                // Fallback: show pivot as crosshair
-                cachedFrustumCorners = null;
-                GUI.BeginClip(minimapRect);
-                Vector2 pivotLocal = WorldToMinimapLocal(sv.pivot, minimapRect);
-                DrawCrosshairLocal(pivotLocal, minimapRect.size);
-                GUI.EndClip();
-                return;
-            }
-
-            // Convert to absolute screen coordinates and clamp to minimap bounds
+            // Convert to absolute screen coordinates without clamping. Per-axis clamping was
+            // collapsing far corners onto the rect edges (often producing degenerate triangles
+            // when several corners snapped to the same edge), which caused the frustum quad to
+            // briefly mis-shape during drag. Instead we keep the true corners and let the line
+            // clipper trim each edge to the rect.
             Vector2[] absCorners = new Vector2[4];
             for (int i = 0; i < 4; i++)
             {
                 absCorners[i] = new Vector2(
-                    minimapRect.x + Mathf.Clamp(corners[i].x, 0, minimapRect.width),
-                    minimapRect.y + Mathf.Clamp(corners[i].y, 0, minimapRect.height)
+                    minimapRect.x + corners[i].x,
+                    minimapRect.y + corners[i].y
                 );
             }
             cachedFrustumCorners = absCorners;
 
-            // Draw quadrilateral
             Color frustumColor = new Color(1f, 1f, 0f, 0.9f);
             float thickness = 2f;
 
-            DrawLineLocal(absCorners[0], absCorners[1], frustumColor, thickness);
-            DrawLineLocal(absCorners[1], absCorners[2], frustumColor, thickness);
-            DrawLineLocal(absCorners[2], absCorners[3], frustumColor, thickness);
-            DrawLineLocal(absCorners[3], absCorners[0], frustumColor, thickness);
+            // Sutherland-Hodgman polygon clipping: clip the whole frustum quad against the rect
+            // and draw the resulting closed polyline. Per-edge line clipping (Liang-Barsky) caused
+            // popping when the quad extended past the rect — adjacent edges' clipped portions had
+            // gaps along the rect boundary that flickered in/out as corners crossed thresholds.
+            // Polygon clipping closes those gaps with rect-boundary segments, so the outline morphs
+            // continuously instead of edges blinking on and off.
+            List<Vector2> clipped = ClipPolygonToRect(absCorners, minimapRect);
+            int n = clipped.Count;
+            for (int i = 0; i < n; i++)
+            {
+                DrawLineLocal(clipped[i], clipped[(i + 1) % n], frustumColor, thickness);
+            }
+        }
+
+        // Sutherland-Hodgman polygon clipping. Reused buffers avoid per-frame allocations.
+        private static readonly List<Vector2> sClipBufA = new List<Vector2>(8);
+        private static readonly List<Vector2> sClipBufB = new List<Vector2>(8);
+
+        private static List<Vector2> ClipPolygonToRect(Vector2[] polygon, Rect rect)
+        {
+            sClipBufA.Clear();
+            sClipBufA.AddRange(polygon);
+
+            sClipBufB.Clear();
+            ClipAgainstEdge(sClipBufA, sClipBufB, 0, rect.xMin); // x >= xMin
+            if (sClipBufB.Count == 0) return sClipBufB;
+
+            sClipBufA.Clear();
+            ClipAgainstEdge(sClipBufB, sClipBufA, 1, rect.xMax); // x <= xMax
+            if (sClipBufA.Count == 0) return sClipBufA;
+
+            sClipBufB.Clear();
+            ClipAgainstEdge(sClipBufA, sClipBufB, 2, rect.yMin); // y >= yMin
+            if (sClipBufB.Count == 0) return sClipBufB;
+
+            sClipBufA.Clear();
+            ClipAgainstEdge(sClipBufB, sClipBufA, 3, rect.yMax); // y <= yMax
+            return sClipBufA;
+        }
+
+        private static void ClipAgainstEdge(List<Vector2> input, List<Vector2> output, int edgeKind, float v)
+        {
+            if (input.Count == 0) return;
+
+            Vector2 prev = input[input.Count - 1];
+            bool prevInside = IsInsideEdge(prev, edgeKind, v);
+
+            for (int i = 0; i < input.Count; i++)
+            {
+                Vector2 curr = input[i];
+                bool currInside = IsInsideEdge(curr, edgeKind, v);
+
+                if (currInside)
+                {
+                    if (!prevInside) output.Add(EdgeIntersect(prev, curr, edgeKind, v));
+                    output.Add(curr);
+                }
+                else if (prevInside)
+                {
+                    output.Add(EdgeIntersect(prev, curr, edgeKind, v));
+                }
+
+                prev = curr;
+                prevInside = currInside;
+            }
+        }
+
+        private static bool IsInsideEdge(Vector2 p, int edgeKind, float v)
+        {
+            switch (edgeKind)
+            {
+                case 0: return p.x >= v;
+                case 1: return p.x <= v;
+                case 2: return p.y >= v;
+                default: return p.y <= v;
+            }
+        }
+
+        private static Vector2 EdgeIntersect(Vector2 a, Vector2 b, int edgeKind, float v)
+        {
+            if (edgeKind <= 1)
+            {
+                float dx = b.x - a.x;
+                if (Mathf.Approximately(dx, 0f)) return new Vector2(v, a.y);
+                float t = (v - a.x) / dx;
+                return new Vector2(v, a.y + t * (b.y - a.y));
+            }
+            float dy = b.y - a.y;
+            if (Mathf.Approximately(dy, 0f)) return new Vector2(a.x, v);
+            float ty = (v - a.y) / dy;
+            return new Vector2(a.x + ty * (b.x - a.x), v);
         }
 
         // Convex-quad point-in-polygon: cursor is inside iff it's on the same side
