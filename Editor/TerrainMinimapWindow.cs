@@ -6,6 +6,7 @@ namespace DivineDragon.MapTools
     public class TerrainMinimapWindow : EditorWindow
     {
         private enum MinimapGridMode { None, Simple, Island }
+        private enum MinimapOrientationMode { NorthUp, CameraStable, CameraLive }
 
         // Keep in sync with TerrainPaintToolWindow.TILE_SIZE (world units per tile)
         private const float TILE_SIZE = 5f;
@@ -41,9 +42,11 @@ namespace DivineDragon.MapTools
         private Vector3 grabStartPivot;
         private bool naturalScroll = false;
         private MinimapGridMode gridMode = MinimapGridMode.None;
+        private MinimapOrientationMode orientationMode = MinimapOrientationMode.NorthUp;
 
         private const string PREFS_NATURAL_SCROLL = "TerrainMinimap_NaturalScroll";
         private const string PREFS_GRID_MODE = "TerrainMinimap_GridMode";
+        private const string PREFS_ORIENTATION_MODE = "TerrainMinimap_OrientationMode";
 
         [MenuItem("Map Tools/Terrain Minimap")]
         public static void ShowWindow()
@@ -82,6 +85,7 @@ namespace DivineDragon.MapTools
             TerrainPaintToolWindow.OnTerrainSelectionChanged += OnTerrainSelectionChanged;
             naturalScroll = EditorPrefs.GetBool(PREFS_NATURAL_SCROLL, false);
             gridMode = (MinimapGridMode)EditorPrefs.GetInt(PREFS_GRID_MODE, 0);
+            orientationMode = (MinimapOrientationMode)EditorPrefs.GetInt(PREFS_ORIENTATION_MODE, 0);
 
             // Auto-sync with paint tool on enable (handles recompile/reopen)
             if (isCurrentMapMode)
@@ -207,6 +211,16 @@ namespace DivineDragon.MapTools
                 Repaint();
             }
 
+            // Orientation dropdown: north-up vs camera-forward (stable size or live-fit)
+            string[] orientationNames = { "North", "Camera", "Camera (Live)" };
+            int newOrientation = EditorGUILayout.Popup((int)orientationMode, orientationNames, EditorStyles.toolbarPopup, GUILayout.Width(110));
+            if (newOrientation != (int)orientationMode)
+            {
+                orientationMode = (MinimapOrientationMode)newOrientation;
+                EditorPrefs.SetInt(PREFS_ORIENTATION_MODE, newOrientation);
+                Repaint();
+            }
+
             EditorGUILayout.EndHorizontal();
         }
 
@@ -286,8 +300,25 @@ namespace DivineDragon.MapTools
                 drawRect = new Rect(available.x + xOffset, available.y, width, available.height);
             }
 
-            // Draw background
+            // Always paint the bounding background un-rotated so any spillover doesn't bleed
+            // beyond the minimap rect.
             EditorGUI.DrawRect(drawRect, new Color(0.15f, 0.15f, 0.15f, 1f));
+
+            // Camera-forward orientation rotates the canvas around the minimap center so the
+            // scene camera's facing direction always points "up" on the minimap. We also
+            // rescale uniformly so the rotated bounding box fits inside the original drawRect
+            // (otherwise corners poke outside).
+            float rotationDeg = ComputeMinimapRotationDegrees();
+            bool isRotated = !Mathf.Approximately(rotationDeg, 0f);
+            Vector2 rotPivot = drawRect.center;
+            float fitScale = isRotated ? ComputeFitScaleForMode(rotationDeg, drawRect) : 1f;
+
+            Matrix4x4 prevMatrix = GUI.matrix;
+            if (isRotated)
+            {
+                GUIUtility.RotateAroundPivot(rotationDeg, rotPivot);
+                GUIUtility.ScaleAroundPivot(new Vector2(fitScale, fitScale), rotPivot);
+            }
 
             // Draw minimap texture
             GUI.DrawTexture(drawRect, minimapTexture, ScaleMode.StretchToFill);
@@ -308,8 +339,53 @@ namespace DivineDragon.MapTools
             DrawHoverHighlight(drawRect);
             DrawSampleHighlight(drawRect);
 
-            // Handle input
-            HandleMinimapInput(drawRect);
+            GUI.matrix = prevMatrix;
+
+            // Handle input (un-rotates and un-scales the cursor internally)
+            HandleMinimapInput(drawRect, rotationDeg, rotPivot, fitScale);
+        }
+
+        private static float ComputeFitScale(float rotationDeg, Rect rect)
+        {
+            float radAbs = Mathf.Abs(rotationDeg) * Mathf.Deg2Rad;
+            float c = Mathf.Abs(Mathf.Cos(radAbs));
+            float s = Mathf.Abs(Mathf.Sin(radAbs));
+            float boundingWidth = rect.width * c + rect.height * s;
+            float boundingHeight = rect.width * s + rect.height * c;
+            if (boundingWidth <= 0f || boundingHeight <= 0f) return 1f;
+            return Mathf.Min(rect.width / boundingWidth, rect.height / boundingHeight);
+        }
+
+        // Worst-case scale across all rotation angles for this rect. Used by CameraStable so the
+        // minimap stays a constant size as the camera spins.
+        private static float ComputeWorstCaseFitScale(Rect rect)
+        {
+            float worst = 1f;
+            for (int deg = 0; deg <= 90; deg += 5)
+            {
+                worst = Mathf.Min(worst, ComputeFitScale(deg, rect));
+            }
+            return worst;
+        }
+
+        private float ComputeFitScaleForMode(float rotationDeg, Rect rect)
+        {
+            if (orientationMode == MinimapOrientationMode.CameraStable)
+            {
+                return ComputeWorstCaseFitScale(rect);
+            }
+            return ComputeFitScale(rotationDeg, rect);
+        }
+
+        private float ComputeMinimapRotationDegrees()
+        {
+            if (orientationMode == MinimapOrientationMode.NorthUp) return 0f;
+            if (!isCurrentMapMode) return 0f;
+            var sv = SceneView.lastActiveSceneView;
+            if (sv == null || sv.camera == null) return 0f;
+            // Negate the camera's world Y rotation so the canvas spins opposite to the camera,
+            // bringing the camera's forward direction to screen-up.
+            return -sv.camera.transform.eulerAngles.y;
         }
 
         private void DrawViewFrustum(Rect minimapRect)
@@ -761,10 +837,25 @@ namespace DivineDragon.MapTools
             return new Color(color.r * 0.6f, color.g * 0.6f, color.b * 0.6f, 0.8f);
         }
 
-        private void HandleMinimapInput(Rect minimapRect)
+        private void HandleMinimapInput(Rect minimapRect, float rotationDegrees, Vector2 rotationPivot, float fitScale)
         {
             Event e = Event.current;
             Vector2 mousePos = e.mousePosition;
+
+            // If the canvas was transformed, undo the scale and rotation on the cursor so the
+            // existing logic that works in pre-transform (logical) minimap coords keeps working.
+            if (!Mathf.Approximately(rotationDegrees, 0f))
+            {
+                Vector2 d = mousePos - rotationPivot;
+                if (fitScale > 0f && !Mathf.Approximately(fitScale, 1f))
+                {
+                    d /= fitScale;
+                }
+                float rad = -rotationDegrees * Mathf.Deg2Rad;
+                float c = Mathf.Cos(rad);
+                float s = Mathf.Sin(rad);
+                mousePos = new Vector2(d.x * c - d.y * s, d.x * s + d.y * c) + rotationPivot;
+            }
 
             bool mouseInside = minimapRect.Contains(mousePos);
 
@@ -1129,6 +1220,7 @@ namespace DivineDragon.MapTools
             window.flipY = flipY;
             window.naturalScroll = naturalScroll;
             window.gridMode = gridMode;
+            window.orientationMode = orientationMode;
             window.textureDirty = true;
             window.UpdateWindowTitle();
             window.minSize = new Vector2(200, 200);
