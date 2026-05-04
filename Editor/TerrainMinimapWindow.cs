@@ -734,10 +734,16 @@ namespace DivineDragon.MapTools
 
         private void DrawLineLocal(Vector2 a, Vector2 b, Color color, float thickness)
         {
+            // Guard: GL.LoadPixelMatrix + GL.QUADS during a non-Repaint event (Layout, MouseDrag,
+            // MouseMove…) can draw into whichever GL context is currently bound — which during
+            // an editor-drag cascade is sometimes the scene view, leaving phantom geometry there.
+            // All visible IMGUI drawing happens in Repaint anyway, so skipping the others is safe.
+            if (Event.current == null || Event.current.type != EventType.Repaint) return;
+
             Vector2 delta = b - a;
             float length = delta.magnitude;
             if (length < 0.5f) return;
-            
+
             CreateLineMaterial();
             
             Vector2 dir = delta / length;
@@ -1114,61 +1120,85 @@ namespace DivineDragon.MapTools
             sv.Repaint();
         }
 
+        // Snapshot of status-bar branch state captured on the Layout event and reused on the
+        // matching Repaint. Without this, mouse-driven state (hoveredTile, isMinimapSampleMode,
+        // paint-tool sample mode) can flip between the paired Layout and Repaint passes, the two
+        // passes take different branches with different GUILayout control counts, and IMGUI
+        // throws "control N's position in a group with only N controls".
+        private bool statusChipVisible;
+        private string statusChipTid;
+        private string statusLabel;
+
         private void DrawStatusBar()
         {
-            EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
+            if (Event.current.type == EventType.Layout)
+            {
+                CaptureStatusBarState();
+            }
 
-            // Determine sampling state:
-            // - Minimap sample mode takes priority (mouse in minimap with Ctrl/Cmd) - works in both modes
-            // - Scene view sample mode only applies in current map mode
+            EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
+            if (statusChipVisible)
+            {
+                DrawStatusBarColorChip(statusChipTid);
+            }
+            EditorGUILayout.LabelField(statusLabel ?? string.Empty, EditorStyles.miniLabel);
+            EditorGUILayout.EndHorizontal();
+        }
+
+        private void CaptureStatusBarState()
+        {
             bool isSamplingFromMinimap = isMinimapSampleMode && hoveredTile.x >= 0;
             bool isSamplingFromScene = isCurrentMapMode && !isMinimapSampleMode && TerrainPaintToolWindow.IsSampleModeActive;
 
             if (isSamplingFromMinimap && terrain != null && virtualGrid != null)
             {
-                // Show color chip + "Sampling" with minimap's hovered tile
-                DrawStatusBarColorChip(hoveredTerrainTid);
+                statusChipVisible = true;
+                statusChipTid = hoveredTerrainTid;
                 string displayName = !string.IsNullOrEmpty(hoveredTerrainTid)
                     ? TerrainDefinitions.GetDisplayString(hoveredTerrainTid)
                     : "Empty";
-                EditorGUILayout.LabelField($"Sampling ({hoveredTile.x}, {hoveredTile.y}): {displayName}", EditorStyles.miniLabel);
+                statusLabel = $"Sampling ({hoveredTile.x}, {hoveredTile.y}): {displayName}";
+                return;
             }
-            else if (isSamplingFromScene && terrain != null && virtualGrid != null)
+
+            if (isSamplingFromScene && terrain != null && virtualGrid != null)
             {
-                // Show color chip + "Sampling" with main view's hovered tile
                 Vector2Int sampleTile = TerrainPaintToolWindow.HoveredTile;
                 if (sampleTile.x >= 0)
                 {
                     string sampleTerrainTid = virtualGrid.GetTerrainId(sampleTile.x, sampleTile.y);
-                    DrawStatusBarColorChip(sampleTerrainTid);
+                    statusChipVisible = true;
+                    statusChipTid = sampleTerrainTid;
                     string displayName = !string.IsNullOrEmpty(sampleTerrainTid)
                         ? TerrainDefinitions.GetDisplayString(sampleTerrainTid)
                         : "Empty";
-                    EditorGUILayout.LabelField($"Sampling ({sampleTile.x}, {sampleTile.y}): {displayName}", EditorStyles.miniLabel);
+                    statusLabel = $"Sampling ({sampleTile.x}, {sampleTile.y}): {displayName}";
                 }
                 else
                 {
-                    EditorGUILayout.LabelField("Sampling...", EditorStyles.miniLabel);
+                    statusChipVisible = false;
+                    statusChipTid = null;
+                    statusLabel = "Sampling...";
                 }
+                return;
             }
-            else if (hoveredTile.x >= 0 && terrain != null)
+
+            if (hoveredTile.x >= 0 && terrain != null)
             {
-                // Show color chip + normal hover display (local minimap hover)
-                DrawStatusBarColorChip(hoveredTerrainTid);
+                statusChipVisible = true;
+                statusChipTid = hoveredTerrainTid;
                 string displayName = !string.IsNullOrEmpty(hoveredTerrainTid)
                     ? TerrainDefinitions.GetDisplayString(hoveredTerrainTid)
                     : "Empty";
-                EditorGUILayout.LabelField($"({hoveredTile.x}, {hoveredTile.y}): {displayName}", EditorStyles.miniLabel);
-            }
-            else
-            {
-                string hint = isCurrentMapMode
-                    ? "Click/Drag: Move | Scroll: Zoom | Ctrl+Click: Sample"
-                    : "Ctrl+Click: Sample brush";
-                EditorGUILayout.LabelField(hint, EditorStyles.miniLabel);
+                statusLabel = $"({hoveredTile.x}, {hoveredTile.y}): {displayName}";
+                return;
             }
 
-            EditorGUILayout.EndHorizontal();
+            statusChipVisible = false;
+            statusChipTid = null;
+            statusLabel = isCurrentMapMode
+                ? "Click/Drag: Move | Scroll: Zoom | Ctrl+Click: Sample"
+                : "Ctrl+Click: Sample brush";
         }
 
         private void DrawStatusBarColorChip(string terrainTid)
@@ -1183,19 +1213,20 @@ namespace DivineDragon.MapTools
                 chipColor = TerrainDefinitions.GetColorOrFallback(terrainTid);
             }
 
-            // Reserve space and center the chip vertically
             const float chipSize = 12f;
             Rect reservedRect = GUILayoutUtility.GetRect(chipSize, EditorGUIUtility.singleLineHeight, GUILayout.Width(chipSize));
+            GUILayout.Space(4);
+
+            if (Event.current.type != EventType.Repaint) return;
+
             float yOffset = (reservedRect.height - chipSize) / 2f;
             Rect chipRect = new Rect(reservedRect.x, reservedRect.y + yOffset, chipSize, chipSize);
 
             EditorGUI.DrawRect(chipRect, chipColor);
-            // Draw border
             EditorGUI.DrawRect(new Rect(chipRect.x, chipRect.y, chipRect.width, 1), Color.black);
             EditorGUI.DrawRect(new Rect(chipRect.x, chipRect.yMax - 1, chipRect.width, 1), Color.black);
             EditorGUI.DrawRect(new Rect(chipRect.x, chipRect.y, 1, chipRect.height), Color.black);
             EditorGUI.DrawRect(new Rect(chipRect.xMax - 1, chipRect.y, 1, chipRect.height), Color.black);
-            GUILayout.Space(4);
         }
 
         private void RebuildMinimapTexture()
