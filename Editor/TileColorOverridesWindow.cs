@@ -26,6 +26,21 @@ namespace DivineDragon.MapTools
             window.Show();
         }
 
+        /// <summary>
+        /// Open the window pre-filtered to the given terrain id so the user lands directly on
+        /// that row. Used by the paint palette's per-row gear shortcut.
+        /// </summary>
+        public static void ShowForTerrain(string tid)
+        {
+            var window = GetWindow<TileColorOverridesWindow>();
+            window.titleContent = new GUIContent("Tile Color Overrides");
+            window.minSize = new Vector2(420, 320);
+            window.searchText = tid ?? string.Empty;
+            window.showOnlyOverridden = false;
+            window.Show();
+            window.Focus();
+        }
+
         private void OnGUI()
         {
             DrawToolbar();

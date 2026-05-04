@@ -3307,7 +3307,20 @@ namespace DivineDragon.MapTools
             // Draw color swatch — route through GetColorOrFallback so editor-only overrides apply
             Rect colorRect = GUILayoutUtility.GetRect(20, 20, GUILayout.Width(20));
             EditorGUI.DrawRect(colorRect, TerrainDefinitions.GetColorOrFallback(terrain.tid));
-            EditorGUI.DrawRect(colorRect, new Color(0, 0, 0, 0.2f)); // Border
+            bool isOverridden = TileColorOverridesProvider.TryGetOverride(terrain.tid, out _);
+            if (isOverridden)
+            {
+                // Bright outline so overridden tiles read as "not the game's color".
+                Color outline = new Color(1f, 0.85f, 0.2f, 1f);
+                EditorGUI.DrawRect(new Rect(colorRect.x, colorRect.y, colorRect.width, 1), outline);
+                EditorGUI.DrawRect(new Rect(colorRect.x, colorRect.yMax - 1, colorRect.width, 1), outline);
+                EditorGUI.DrawRect(new Rect(colorRect.x, colorRect.y, 1, colorRect.height), outline);
+                EditorGUI.DrawRect(new Rect(colorRect.xMax - 1, colorRect.y, 1, colorRect.height), outline);
+            }
+            else
+            {
+                EditorGUI.DrawRect(colorRect, new Color(0, 0, 0, 0.2f)); // Subtle darken (existing look)
+            }
             
             if (showUsageIndicator)
             {
@@ -3342,9 +3355,21 @@ namespace DivineDragon.MapTools
                 selectedBrushTerrain = terrain.tid;
                 SceneView.RepaintAll();
             }
-            
+
             GUI.backgroundColor = previousBg;
-            
+
+            // Per-row override shortcut: opens the Tile Color Overrides window pre-filtered to
+            // this tid so the user lands on the right row immediately. Tooltip explains the
+            // feature on hover so it's discoverable without docs.
+            GUIContent gearContent = new GUIContent("…",
+                isOverridden
+                    ? "Edit / clear this tile's editor-only color override"
+                    : "Set an editor-only color override for this tile");
+            if (GUILayout.Button(gearContent, EditorStyles.toolbarButton, GUILayout.Width(22)))
+            {
+                TileColorOverridesWindow.ShowForTerrain(terrain.tid);
+            }
+
             EditorGUILayout.EndHorizontal();
         }
 
