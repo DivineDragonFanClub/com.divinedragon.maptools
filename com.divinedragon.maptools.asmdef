@@ -1,0 +1,21 @@
+{
+    "name": "DivineDragon.MapTools",
+    "rootNamespace": "DivineDragon.MapTools",
+    "references": [
+        "GUID:d7d4cd2809fc74e3cb49c47b358359ef",
+        "GUID:332f144202c5345808e8db28bf958969",
+        "GUID:6a01c5aa39d8c480db1ce020a9874d4c",
+        "GUID:db1458f971406467f839724dba4c537d"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

@@ -1,0 +1,3590 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using DivineDragon;
+using DivineDragon.Msbt;
+using DivineDragon.Msbt.Editor;
+using UnityEditor;
+using UnityEditor.SceneManagement;
+using UnityEngine;
+using UnityEngine.SceneManagement;
+using UnityEngine.Rendering;
+
+namespace DivineDragon.MapTools
+{
+    public enum DisplayMode
+    {
+        ColorOnly,
+        Both
+    }
+    
+    public enum TextDisplayMode
+    {
+        ShowTID,
+        ShowName,
+        ShowBoth
+    }
+
+
+    public enum SharedEditorMode
+    {
+        Terrain,
+        Off
+    }
+    
+    // Class to represent a connected group of terrain tiles
+    public class TerrainIsland
+    {
+        public string terrainId;
+        public List<Vector2Int> tiles;
+        public Vector2 center;
+        public List<Vector2> labelPositions;
+        private readonly HashSet<Vector2Int> tileLookup;
+        
+        public TerrainIsland(string id)
+        {
+            terrainId = id;
+            tiles = new List<Vector2Int>();
+            labelPositions = new List<Vector2>();
+            tileLookup = new HashSet<Vector2Int>();
+        }
+
+        public void AddTile(Vector2Int tile)
+        {
+            tiles.Add(tile);
+            tileLookup.Add(tile);
+        }
+
+        public bool ContainsTile(Vector2Int tile) => tileLookup.Contains(tile);
+
+        public HashSet<Vector2Int> TileSet => tileLookup;
+        
+        public void CalculateCenter()
+        {
+            if (tiles.Count == 0) return;
+            
+            float sumX = 0;
+            float sumY = 0;
+            foreach (var tile in tiles)
+            {
+                sumX += tile.x;
+                sumY += tile.y;
+            }
+            center = new Vector2(sumX / tiles.Count, sumY / tiles.Count);
+        }
+        
+        public void CalculateLabelPositions(float cameraDistance)
+        {
+            labelPositions.Clear();
+            
+            if (tiles.Count == 0) return;
+            
+            // Calculate center of mass first
+            CalculateCenter();
+            
+            // Check if the center of mass actually falls within our tiles
+            // This handles cases like sea that surrounds land
+            Vector2Int centerInt = new Vector2Int(Mathf.RoundToInt(center.x), Mathf.RoundToInt(center.y));
+            bool centerIsInTiles = tileLookup.Contains(centerInt);
+            
+            // Also check nearby tiles in case of rounding issues
+            if (!centerIsInTiles)
+            {
+                for (int dx = -1; dx <= 1; dx++)
+                {
+                    for (int dy = -1; dy <= 1; dy++)
+                    {
+                        Vector2Int checkPos = new Vector2Int(centerInt.x + dx, centerInt.y + dy);
+                        if (tileLookup.Contains(checkPos))
+                        {
+                            centerIsInTiles = true;
+                            break;
+                        }
+                    }
+                    if (centerIsInTiles) break;
+                }
+            }
+            
+            if (centerIsInTiles)
+            {
+                // Center is valid, use it
+                labelPositions.Add(center);
+            }
+            else
+            {
+                // Center falls outside our tiles (e.g., sea surrounding land)
+                // Find the largest contiguous section and place label there
+                
+                // Find bounds
+                int minX = int.MaxValue, maxX = int.MinValue;
+                int minY = int.MaxValue, maxY = int.MinValue;
+                foreach (var tile in tiles)
+                {
+                    minX = Mathf.Min(minX, tile.x);
+                    maxX = Mathf.Max(maxX, tile.x);
+                    minY = Mathf.Min(minY, tile.y);
+                    maxY = Mathf.Max(maxY, tile.y);
+                }
+                
+                // Try placing label in corners/edges where we're likely to have solid sections
+                Vector2Int[] candidatePositions = new Vector2Int[]
+                {
+                    new Vector2Int(minX + 2, minY + 2), // Bottom-left
+                    new Vector2Int(maxX - 2, minY + 2), // Bottom-right
+                    new Vector2Int(minX + 2, maxY - 2), // Top-left
+                    new Vector2Int(maxX - 2, maxY - 2), // Top-right
+                    new Vector2Int((minX + maxX) / 2, minY + 2), // Bottom-center
+                    new Vector2Int((minX + maxX) / 2, maxY - 2), // Top-center
+                    new Vector2Int(minX + 2, (minY + maxY) / 2), // Left-center
+                    new Vector2Int(maxX - 2, (minY + maxY) / 2), // Right-center
+                };
+                
+                // Find the candidate that has the most tiles around it
+                Vector2Int bestPosition = tiles.First();
+                int maxNeighbors = 0;
+                
+                foreach (var candidate in candidatePositions)
+                {
+                    if (!tileLookup.Contains(candidate)) continue;
+                    
+                    // Count tiles in a 5x5 area around this candidate
+                    int neighborCount = 0;
+                    for (int dx = -2; dx <= 2; dx++)
+                    {
+                        for (int dy = -2; dy <= 2; dy++)
+                        {
+                            Vector2Int checkPos = new Vector2Int(candidate.x + dx, candidate.y + dy);
+                            if (tileLookup.Contains(checkPos))
+                            {
+                                neighborCount++;
+                            }
+                        }
+                    }
+                    
+                    if (neighborCount > maxNeighbors)
+                    {
+                        maxNeighbors = neighborCount;
+                        bestPosition = candidate;
+                    }
+                }
+                
+                labelPositions.Add(new Vector2(bestPosition.x, bestPosition.y));
+            }
+        }
+    }
+
+    // Screen-space label node cached across frames for relaxed layout
+    class LabelNode
+    {
+        public string key;
+        public Vector2 anchorGui;
+        public Vector2 posGui;
+        public Vector2 preservedOffset; // preserved screen-space offset from anchor during camera movement
+        public float width;
+        public float height;
+        public float priority;
+        public bool seenThisFrame;
+    }
+    
+    public partial class TerrainPaintToolWindow : EditorWindow
+    {
+
+        private static TerrainPaintToolWindow instance;
+        private static SharedEditorMode sharedMode = SharedEditorMode.Terrain;
+        private static TerrainAssetAdapter selectedTerrain;
+        private static bool showGridLines = true;
+        private static float textSize = 0.5f;
+        private static Color textColor = Color.white;
+        private static Color gridColor = new Color(1f, 1f, 1f, 0.3f);
+        private static float gridThickness = 1f;
+        private static float currentGridThicknessWorld = 0.01f;
+        private static Vector3 worldOffset = Vector3.zero;
+
+        private static readonly Dictionary<string, MeshCollider> sceneColliderCache = new Dictionary<string, MeshCollider>(StringComparer.OrdinalIgnoreCase);
+        private static readonly HashSet<string> loggedRaycastFailures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private static readonly List<string> raycastLogRemovalBuffer = new List<string>();
+        private static bool terrainHeightPrefsLoaded = false;
+        private static DisplayMode displayMode = DisplayMode.Both;
+        // Label display is always Labels mode (no chips)
+        private static float colorOpacity = 0.5f;
+        private static float colorBrightness = 1.0f;
+        private static TextDisplayMode textDisplayMode = TextDisplayMode.ShowName;
+        
+        // Island caching for smooth transitions
+        private static readonly Dictionary<TerrainAssetAdapter, List<TerrainIsland>> islandCache = new Dictionary<TerrainAssetAdapter, List<TerrainIsland>>();
+        private static TerrainAssetAdapter lastCachedTerrain = null;
+        private static float lastIslandCameraDistance = -1f;
+        private static float lastFrameTime = 0f;
+        
+        // Screen-space relaxation state/tunables
+        private static Dictionary<string, LabelNode> s_LabelNodes = new Dictionary<string, LabelNode>();
+        private const bool RelaxEnabled = true;
+        private const int RelaxIterations = 1;
+        private const float RelaxAnchorK = 0.05f;
+        private const float RelaxMaxStepPx = 3.0f;
+        private const float RelaxRadiusPxBase = 40f;
+        private const bool RelaxFreezeWhileMoving = true;
+        private const int RelaxLargeIslandTiles = 80;
+        private const float RelaxPriorityLarge = 1.6f;
+        private const float RelaxViewportPad = 8f;
+
+        // Camera movement detection
+        private static Vector3 lastCameraPosition;
+        private static Quaternion lastCameraRotation;
+        private static float lastCameraFOV;
+        private static float cameraStillTime = 0f;
+        private static bool cameraIsMoving = false;
+        private static bool wasCameraMoving = false;
+        private static bool justStartedMoving = false;
+        // Configurable via Settings (Label Relaxation)
+        private static float cameraStillThreshold = 0.02f; // Seconds after camera stops before repulsion resumes (committed default)
+        
+        // Common 4-way neighbor directions
+        private static readonly Vector2Int[] Directions4 = new Vector2Int[]
+        {
+            new Vector2Int(0, 1),   // up
+            new Vector2Int(1, 0),   // right
+            new Vector2Int(0, -1),  // down
+            new Vector2Int(-1, 0)   // left
+        };
+        
+        // Brush painting variables
+        private static bool paintMode = false;
+        private static string selectedBrushTerrain = "";
+        private const int brushSize = 1;
+        private static Vector2Int hoveredTile = new Vector2Int(-1, -1);
+        private static bool isMouseOverGrid = false;
+        private static bool isSampleModeActiveCache = false;
+
+        private const string EmptyTerrainTid = "TID_無し";
+        private const string NoEntryTerrainId = "MTID_NoEntry";
+        
+        private const string PREFS_PREFIX = "TerrainPaintTool_";
+        
+        private const string PREFS_SHOW_GRID = PREFS_PREFIX + "ShowGrid";
+        private const string PREFS_TEXT_SIZE = PREFS_PREFIX + "TextSize";
+        private const string PREFS_TEXT_COLOR = PREFS_PREFIX + "TextColor";
+        private const string PREFS_GRID_COLOR = PREFS_PREFIX + "GridColor";
+        private const string PREFS_GRID_THICKNESS = PREFS_PREFIX + "GridThickness";
+        private const string PREFS_WORLD_OFFSET = PREFS_PREFIX + "WorldOffset";
+        private const string PREFS_TERRAIN_HEIGHTS = PREFS_PREFIX + "TerrainHeights";
+        private const string PREFS_SELECTED_TERRAIN = PREFS_PREFIX + "SelectedTerrain";
+        private const string PREFS_DISPLAY_MODE = PREFS_PREFIX + "DisplayMode";
+        private const string PREFS_COLOR_OPACITY = PREFS_PREFIX + "ColorOpacity";
+        private const string PREFS_COLOR_BRIGHTNESS = PREFS_PREFIX + "ColorBrightness";
+        private const string PREFS_GRID_HEIGHT_FOLDOUT = PREFS_PREFIX + "GridHeightFoldout";
+        // Relaxation settings are committed defaults; no EditorPrefs persistence
+        
+        private Vector2 scrollPosition;
+        private static bool gridHeightFoldout = false;
+        private Vector2 paletteScrollPosition;
+        private string terrainSearchFilter = "";
+        
+        private const float TILE_SIZE = 5f;
+        private const float LABEL_ICON_SIZE = 8f;
+        private const float LABEL_ICON_PADDING = 3f;
+
+        [MenuItem("Map Tools/Terrain Paint Tool")]
+        public static void ShowWindow()
+        {
+            instance = GetWindow<TerrainPaintToolWindow>("Terrain Paint Tool");
+            instance.minSize = new Vector2(300, 400);
+        }
+
+        public static SharedEditorMode GetSharedEditorMode() => sharedMode;
+
+        public static void SetSharedEditorMode(SharedEditorMode mode)
+        {
+            if (sharedMode == mode)
+            {
+                return;
+            }
+
+            sharedMode = mode;
+            if (mode == SharedEditorMode.Off)
+            {
+                if (isPaintingStroke)
+                {
+                    EndPaintStroke();
+                }
+                paintMode = false;
+            }
+
+            SceneView.RepaintAll();
+        }
+
+        public static bool IsTerrainEditingEnabled => sharedMode == SharedEditorMode.Terrain;
+
+        public static bool ShouldRenderTerrainOverlay()
+        {
+            return sharedMode != SharedEditorMode.Off && selectedTerrain != null;
+        }
+
+        public static bool ShouldRenderTerrainGrid()
+        {
+            return sharedMode != SharedEditorMode.Off && showGridLines && selectedTerrain != null;
+        }
+
+        /// <summary>
+        /// Gets the currently selected terrain in the paint tool.
+        /// Used by TerrainMinimapWindow to sync with the main editor.
+        /// </summary>
+        public static TerrainAssetAdapter SelectedTerrain => selectedTerrain;
+
+        /// <summary>
+        /// Gets the currently hovered tile in the paint tool.
+        /// Returns (-1, -1) if no tile is being hovered.
+        /// </summary>
+        public static Vector2Int HoveredTile => hoveredTile;
+
+        /// <summary>
+        /// Gets whether sample mode is currently active (Ctrl/Cmd held in paint mode).
+        /// This is cached during scene GUI and safe to read from other windows.
+        /// </summary>
+        public static bool IsSampleModeActive => isSampleModeActiveCache;
+
+        /// <summary>
+        /// Sets the active brush terrain by TID.
+        /// Used by TerrainMinimapWindow to sample terrain from the minimap.
+        /// </summary>
+        public static void SetBrushTerrain(string tid)
+        {
+            if (string.IsNullOrEmpty(tid)) return;
+            selectedBrushTerrain = tid;
+            instance?.Repaint();
+        }
+
+        private void OnEnable()
+        {
+            instance = this;
+            SceneView.duringSceneGui -= OnSceneGUI;
+            SceneView.duringSceneGui += OnSceneGUI;
+            Undo.undoRedoPerformed -= OnUndoRedo;
+            Undo.undoRedoPerformed += OnUndoRedo;
+            EditorSceneManager.activeSceneChangedInEditMode -= OnActiveSceneChanged;
+            EditorSceneManager.activeSceneChangedInEditMode += OnActiveSceneChanged;
+            EditorApplication.hierarchyChanged -= OnHierarchyChanged;
+            EditorApplication.hierarchyChanged += OnHierarchyChanged;
+            InvalidateSceneColliderLists();
+            LoadSettings();
+        }
+        
+        private static void OnUndoRedo()
+        {
+            // Clear island cache when undo/redo is performed
+            // This ensures borders are recalculated after terrain changes
+            islandCache.Clear();
+            lastCachedTerrain = null;
+            s_LabelNodes.Clear();
+            TerrainVirtualGridCache.ClearAll();
+            TerrainRegionCache.ClearAll();
+            sceneColliderCache.Clear();
+            InvalidateSceneColliderLists();
+            InvalidateOverlayMesh(null);
+            InvalidateGridMesh(null);
+            SceneView.RepaintAll();
+            if (instance != null)
+            {
+                instance.Repaint();
+            }
+        }
+        
+        private static Color GetContrastColor(Color backgroundColor)
+        {
+            // Calculate perceived luminance using the relative luminance formula
+            // Using gamma-corrected values for better accuracy
+            float r = backgroundColor.r;
+            float g = backgroundColor.g;
+            float b = backgroundColor.b;
+            
+            // Apply gamma correction for more accurate luminance calculation
+            r = r <= 0.03928f ? r / 12.92f : Mathf.Pow((r + 0.055f) / 1.055f, 2.4f);
+            g = g <= 0.03928f ? g / 12.92f : Mathf.Pow((g + 0.055f) / 1.055f, 2.4f);
+            b = b <= 0.03928f ? b / 12.92f : Mathf.Pow((b + 0.055f) / 1.055f, 2.4f);
+            
+            // Calculate relative luminance
+            float luminance = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+            
+            // For mid-range colors, check if we need to add an outline
+            if (luminance > 0.4f && luminance < 0.6f)
+            {
+                // For mid-range brightness, prefer white with black outline (handled in DrawLabelWithColoredIcon)
+                return Color.white;
+            }
+            else if (luminance > 0.45f)
+            {
+                // For lighter backgrounds, use black
+                return Color.black;
+            }
+            else
+            {
+                // For darker backgrounds, use white
+                return Color.white;
+            }
+        }
+        
+    // Resolve label color with auto contrast
+        private static Color ResolveLabelColor(string terrainId, bool checkDisplayMode = true)
+        {
+            if (!checkDisplayMode || displayMode == DisplayMode.Both)
+            {
+                return GetContrastColor(GetBaseTerrainColor(terrainId));
+            }
+            return textColor;
+        }
+
+        private static Color GetBaseTerrainColor(string terrainId)
+        {
+            if (string.IsNullOrEmpty(terrainId))
+            {
+                return Color.gray;
+            }
+
+            if (!terrainColorCache.TryGetValue(terrainId, out Color baseColor))
+            {
+                baseColor = TerrainDefinitions.GetColorOrFallback(terrainId);
+                terrainColorCache[terrainId] = baseColor;
+            }
+
+            return baseColor;
+        }
+
+        private static Color GetTileFillColor(string terrainId)
+        {
+            Color color = GetBaseTerrainColor(terrainId);
+            color.r = Mathf.Clamp01(color.r * colorBrightness);
+            color.g = Mathf.Clamp01(color.g * colorBrightness);
+            color.b = Mathf.Clamp01(color.b * colorBrightness);
+            color.a = colorOpacity;
+            return color;
+        }
+
+        private static Color GetBorderColor(string terrainId)
+        {
+            Color color = GetTileFillColor(terrainId);
+            return new Color(color.r * 0.6f, color.g * 0.6f, color.b * 0.6f, 1f);
+        }
+
+        private static void InvalidateTerrainCaches()
+        {
+            terrainColorCache.Clear();
+            paintableTerrainsDirty = true;
+            InvalidateTerrainHeightCache(null);
+            InvalidateOverlayMesh(null);
+            InvalidateGridMesh(null);
+        }
+
+        private static void RemoveRaycastFailureEntries(string assetPath)
+        {
+            if (string.IsNullOrEmpty(assetPath))
+            {
+                return;
+            }
+
+            raycastLogRemovalBuffer.Clear();
+            foreach (string key in loggedRaycastFailures)
+            {
+                string[] parts = key.Split('|');
+                if (parts.Length >= 2 && string.Equals(parts[1], assetPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    raycastLogRemovalBuffer.Add(key);
+                }
+            }
+
+            foreach (string key in raycastLogRemovalBuffer)
+            {
+                loggedRaycastFailures.Remove(key);
+            }
+        }
+        internal static void NotifyTerrainDatabaseChanged()
+        {
+            InvalidateTerrainCaches();
+            if (instance != null)
+            {
+                instance.Repaint();
+            }
+            SceneView.RepaintAll();
+        }
+
+        internal static Vector3 GetWorldOffset()
+        {
+            return worldOffset;
+        }
+
+        internal static float GetHeightOffsetForTerrain(TerrainAssetAdapter terrain)
+        {
+            return GetHeightSettings(terrain).offset;
+        }
+
+        private static void ApplyTerrainHeightForSelection()
+        {
+            worldOffset.y = GetHeightOffsetForTerrain(selectedTerrain);
+        }
+
+        private static void OnActiveSceneChanged(Scene previousScene, Scene newScene)
+        {
+            InvalidateTerrainHeightCache(null);
+            LoadTerrainFromActiveScene(silentIfNotFound: true);
+            SceneView.RepaintAll();
+        }
+
+        private static void OnHierarchyChanged()
+        {
+            InvalidateSceneColliderLists();
+            sceneColliderCache.Clear();
+            SceneView.RepaintAll();
+            if (instance != null)
+            {
+                instance.Repaint();
+            }
+        }
+
+        private static string BuildRaycastLogKey(TerrainAssetAdapter terrain, string sceneKey, string colliderPath)
+        {
+            string path = string.Empty;
+            if (terrain?.Asset != null)
+            {
+                path = AssetDatabase.GetAssetPath(terrain.Asset);
+            }
+
+            string terrainSegment = path ?? string.Empty;
+            string sceneSegment = sceneKey ?? string.Empty;
+            string colliderSegment = colliderPath ?? string.Empty;
+            return sceneSegment + "|" + terrainSegment + "|" + colliderSegment;
+        }
+
+        private static void LogRaycastFailure(TerrainAssetAdapter terrain, string sceneKey, string colliderPath, string message)
+        {
+            string key = BuildRaycastLogKey(terrain, sceneKey, colliderPath);
+            if (loggedRaycastFailures.Contains(key))
+            {
+                return;
+            }
+
+            string terrainName = terrain?.Name ?? "<none>";
+            string colliderInfo = string.IsNullOrEmpty(colliderPath) ? "<auto>" : colliderPath;
+            string composedMessage = $"[Terrain Painter] {message} (Scene: {sceneKey}, Terrain: {terrainName}, Collider: {colliderInfo})";
+            Debug.LogWarning(composedMessage);
+            loggedRaycastFailures.Add(key);
+        }
+
+        private static string GetSceneKey(Scene scene)
+        {
+            if (!scene.IsValid())
+            {
+                return string.Empty;
+            }
+
+            return !string.IsNullOrEmpty(scene.path) ? scene.path : scene.name;
+        }
+
+        private static string GetActiveSceneKey()
+        {
+            return GetSceneKey(SceneManager.GetActiveScene());
+        }
+
+        private static void FillQuad(Vector3[] buffer, float x, float z, float y, float size = TILE_SIZE, float yOffset = 0f)
+        {
+            float baseY = y + yOffset;
+            buffer[0] = new Vector3(x, baseY, z);
+            buffer[1] = new Vector3(x + size, baseY, z);
+            buffer[2] = new Vector3(x + size, baseY, z + size);
+            buffer[3] = new Vector3(x, baseY, z + size);
+        }
+
+        // Modifier detection for sampling (support Ctrl and Cmd)
+        private static bool IsSamplingModifier(Event e)
+        {
+            return e != null && (e.control || e.command);
+        }
+
+        // Modifier detection for fill (Shift without Ctrl/Cmd)
+        private static bool IsFillModifier(Event e)
+        {
+            return e != null && e.shift && !e.control && !e.command;
+        }
+
+        private static bool IsEmptyTerrain(string terrainId) => TerrainVirtualGridCache.IsEmptyTerrain(terrainId);
+
+        private static TerrainVirtualGrid GetVirtualGrid(TerrainAssetAdapter terrain) => TerrainVirtualGridCache.GetGrid(terrain);
+
+        private static void InvalidateVirtualGrid(TerrainAssetAdapter terrain) => TerrainVirtualGridCache.Invalidate(terrain);
+
+        private static void RecordTerrainUndo(TerrainAssetAdapter terrain, string label)
+        {
+            if (terrain?.Asset != null)
+            {
+                Undo.RecordObject(terrain.Asset, label);
+            }
+        }
+
+        private static string[] EnsureTerrainArrayCapacity(TerrainAssetAdapter terrain, string[] tiles, int expectedCount)
+        {
+            if (terrain == null || expectedCount <= 0)
+            {
+                return tiles ?? Array.Empty<string>();
+            }
+
+            int currentLength = tiles?.Length ?? 0;
+            if (currentLength >= expectedCount)
+            {
+                return tiles;
+            }
+
+            string[] newTiles = new string[expectedCount];
+            if (currentLength > 0)
+            {
+                Array.Copy(tiles, newTiles, currentLength);
+            }
+            for (int i = currentLength; i < expectedCount; i++)
+            {
+                newTiles[i] = EmptyTerrainTid;
+            }
+
+            terrain.m_Terrains = newTiles;
+            return newTiles;
+        }
+
+        private static bool ConvertTrailingEmptyToNoEntry(string[] tiles)
+        {
+            if (tiles == null || tiles.Length == 0)
+            {
+                return false;
+            }
+
+            bool changed = false;
+            for (int i = tiles.Length - 1; i >= 0; i--)
+            {
+                string tid = tiles[i];
+                if (!IsEmptyTerrain(tid))
+                {
+                    break;
+                }
+                if (tiles[i] != NoEntryTerrainId)
+                {
+                    tiles[i] = NoEntryTerrainId;
+                    changed = true;
+                }
+            }
+            return changed;
+        }
+
+        private static void MarkTerrainDirty(TerrainAssetAdapter terrain)
+        {
+            if (terrain?.Asset != null)
+            {
+                EditorUtility.SetDirty(terrain.Asset);
+            }
+
+            if (terrain != null)
+            {
+                islandCache.Remove(terrain);
+                InvalidateVirtualGrid(terrain);
+                TerrainRegionCache.Invalidate(terrain);
+                InvalidateTerrainHeightCache(terrain);
+                InvalidateOverlayMesh(terrain);
+            }
+        }
+
+        /// <summary>
+        /// Event fired when terrain data changes. Used by minimap and other windows to refresh.
+        /// </summary>
+        public static event System.Action<TerrainAssetAdapter> OnTerrainDataChanged;
+
+        /// <summary>
+        /// Event fired when the selected terrain changes. Used by minimap to sync.
+        /// </summary>
+        public static event System.Action<TerrainAssetAdapter> OnTerrainSelectionChanged;
+
+        /// <summary>
+        /// Called externally (e.g., from SwapTerrainDialog) to notify the tool that terrain data has changed.
+        /// </summary>
+        public static void NotifyTerrainDataChanged(TerrainAssetAdapter terrain)
+        {
+            if (terrain != null)
+            {
+                islandCache.Remove(terrain);
+                InvalidateVirtualGrid(terrain);
+                TerrainRegionCache.Invalidate(terrain);
+                InvalidateTerrainHeightCache(terrain);
+                InvalidateOverlayMesh(terrain);
+                paintableTerrainsDirty = true;
+            }
+            SceneView.RepaintAll();
+            instance?.Repaint();
+            OnTerrainDataChanged?.Invoke(terrain);
+        }
+
+        // Per-session caches
+        private static readonly Dictionary<string, Color> terrainColorCache = new Dictionary<string, Color>();
+        private static readonly List<TerrainType> paintableTerrainsCache = new List<TerrainType>();
+        private static bool paintableTerrainsDirty = true;
+        private static readonly Dictionary<string, string> s_LabelTextCache = new Dictionary<string, string>(64);
+        private static readonly HashSet<string> s_LabelFrameKeys = new HashSet<string>();
+        private static readonly List<LabelNode> s_FrameLabelNodes = new List<LabelNode>(64);
+        private static readonly List<string> s_LabelRemovalBuffer = new List<string>(32);
+        private static readonly Vector3[] s_TileVertices = new Vector3[4];
+        private static readonly Vector3[] s_TileVerticesOverlay = new Vector3[4];
+        private static GUIContent s_LabelContent = new GUIContent();
+        private static System.Collections.Generic.Dictionary<string,float> labelAlphaStates = new System.Collections.Generic.Dictionary<string,float>();
+
+        private void OnDisable()
+        {
+            SceneView.duringSceneGui -= OnSceneGUI;
+            Undo.undoRedoPerformed -= OnUndoRedo;
+            EditorSceneManager.activeSceneChangedInEditMode -= OnActiveSceneChanged;
+            EditorApplication.hierarchyChanged -= OnHierarchyChanged;
+            DisposeOverlayMeshes();
+            DisposeGridMeshes();
+            if (overlayMaterial != null)
+            {
+                UnityEngine.Object.DestroyImmediate(overlayMaterial);
+                overlayMaterial = null;
+            }
+        }
+
+        private void OnDestroy()
+        {
+            SceneView.duringSceneGui -= OnSceneGUI;
+            Undo.undoRedoPerformed -= OnUndoRedo;
+            EditorSceneManager.activeSceneChangedInEditMode -= OnActiveSceneChanged;
+            EditorApplication.hierarchyChanged -= OnHierarchyChanged;
+            DisposeOverlayMeshes();
+            DisposeGridMeshes();
+            if (overlayMaterial != null)
+            {
+                UnityEngine.Object.DestroyImmediate(overlayMaterial);
+                overlayMaterial = null;
+            }
+        }
+        
+        private void LoadSettings()
+        {
+            LoadTerrainHeightPreferencesIfNeeded();
+            showGridLines = EditorPrefs.GetBool(PREFS_SHOW_GRID, true);
+            textSize = EditorPrefs.GetFloat(PREFS_TEXT_SIZE, 1.5f);
+            gridThickness = EditorPrefs.GetFloat(PREFS_GRID_THICKNESS, 1f);
+            displayMode = (DisplayMode)EditorPrefs.GetInt(PREFS_DISPLAY_MODE, (int)DisplayMode.Both);
+            colorOpacity = EditorPrefs.GetFloat(PREFS_COLOR_OPACITY, 0.5f);
+            colorBrightness = EditorPrefs.GetFloat(PREFS_COLOR_BRIGHTNESS, 1.0f);
+            
+            string colorStr = EditorPrefs.GetString(PREFS_TEXT_COLOR, ColorUtility.ToHtmlStringRGBA(Color.white));
+            ColorUtility.TryParseHtmlString("#" + colorStr, out textColor);
+            
+            colorStr = EditorPrefs.GetString(PREFS_GRID_COLOR, ColorUtility.ToHtmlStringRGBA(new Color(1f, 1f, 1f, 0.3f)));
+            ColorUtility.TryParseHtmlString("#" + colorStr, out gridColor);
+            
+            float x = EditorPrefs.GetFloat(PREFS_WORLD_OFFSET + "_X", 0);
+            float y = EditorPrefs.GetFloat(PREFS_WORLD_OFFSET + "_Y", 0);
+            float z = EditorPrefs.GetFloat(PREFS_WORLD_OFFSET + "_Z", 0);
+            worldOffset = new Vector3(x, y, z);
+            gridHeightFoldout = EditorPrefs.GetBool(PREFS_GRID_HEIGHT_FOLDOUT, false);
+            
+            string terrainPath = EditorPrefs.GetString(PREFS_SELECTED_TERRAIN, "");
+            if (!string.IsNullOrEmpty(terrainPath))
+            {
+                selectedTerrain = TerrainAssetAdapter.Load(terrainPath);
+                lastCachedTerrain = null;
+                InvalidateVirtualGrid(selectedTerrain);
+                TerrainRegionCache.ClearAll();
+                s_LabelNodes.Clear();
+                labelAlphaStates.Clear();
+            }
+
+            PruneMeshCaches(selectedTerrain);
+
+            ApplyTerrainHeightForSelection();
+
+            // Relaxation: committed defaults (no prefs load)
+        }
+        
+        private static void SaveSettings()
+        {
+            StoreCurrentTerrainHeight();
+            EditorPrefs.SetBool(PREFS_SHOW_GRID, showGridLines);
+            EditorPrefs.SetFloat(PREFS_TEXT_SIZE, textSize);
+            EditorPrefs.SetFloat(PREFS_GRID_THICKNESS, gridThickness);
+            EditorPrefs.SetInt(PREFS_DISPLAY_MODE, (int)displayMode);
+            EditorPrefs.SetFloat(PREFS_COLOR_OPACITY, colorOpacity);
+            EditorPrefs.SetFloat(PREFS_COLOR_BRIGHTNESS, colorBrightness);
+            EditorPrefs.SetString(PREFS_TEXT_COLOR, ColorUtility.ToHtmlStringRGBA(textColor));
+            EditorPrefs.SetString(PREFS_GRID_COLOR, ColorUtility.ToHtmlStringRGBA(gridColor));
+            EditorPrefs.SetFloat(PREFS_WORLD_OFFSET + "_X", worldOffset.x);
+            EditorPrefs.SetFloat(PREFS_WORLD_OFFSET + "_Y", worldOffset.y);
+            EditorPrefs.SetFloat(PREFS_WORLD_OFFSET + "_Z", worldOffset.z);
+            EditorPrefs.SetBool(PREFS_GRID_HEIGHT_FOLDOUT, gridHeightFoldout);
+            
+            if (selectedTerrain?.Asset != null)
+            {
+                string path = AssetDatabase.GetAssetPath(selectedTerrain.Asset);
+                EditorPrefs.SetString(PREFS_SELECTED_TERRAIN, path);
+            }
+            else
+            {
+                EditorPrefs.SetString(PREFS_SELECTED_TERRAIN, "");
+            }
+
+            // Relaxation: committed defaults (no prefs save)
+        }
+
+        private static void SaveSelectedTerrainAsset()
+        {
+            if (selectedTerrain?.Asset == null)
+            {
+                return;
+            }
+
+            EditorUtility.SetDirty(selectedTerrain.Asset);
+#if UNITY_2020_1_OR_NEWER
+            AssetDatabase.SaveAssetIfDirty(selectedTerrain.Asset);
+#else
+            AssetDatabase.SaveAssets();
+#endif
+            AssetDatabase.Refresh();
+        }
+
+        private static int uiTabIndex = 0; // 0 = Main, 1 = Settings, 2 = Advanced
+
+        private void DrawGridHeightControls(TerrainAssetAdapter terrain)
+        {
+            if (terrain == null)
+            {
+                return;
+            }
+
+            TerrainHeightSettings heightSettings = GetHeightSettings(terrain);
+
+            EditorGUI.BeginChangeCheck();
+            TerrainHeightMode newMode = (TerrainHeightMode)EditorGUILayout.EnumPopup(
+                new GUIContent("Height Mode", "Choose how overlay heights are computed: a fixed offset plane or raycasts against the active scene mesh."),
+                heightSettings.mode);
+            if (EditorGUI.EndChangeCheck())
+            {
+                SetHeightModeForTerrain(terrain, newMode);
+                SceneView.RepaintAll();
+                heightSettings = GetHeightSettings(terrain);
+            }
+
+            EditorGUI.BeginChangeCheck();
+            float newHeight = EditorGUILayout.FloatField(
+                new GUIContent("Height Offset", "Vertical offset applied after sampling. Positive values lift the overlay above the base height."),
+                heightSettings.offset);
+            if (EditorGUI.EndChangeCheck())
+            {
+                worldOffset.y = newHeight;
+                heightSettings.offset = newHeight;
+                SaveSettings();
+                SceneView.RepaintAll();
+            }
+
+            if (heightSettings.mode == TerrainHeightMode.RaycastMesh)
+            {
+                EditorGUI.indentLevel++;
+
+                bool autoSelect = heightSettings.autoSelectCollider;
+                EditorGUI.BeginChangeCheck();
+                bool newAutoSelect = EditorGUILayout.Toggle(new GUIContent("Auto Select Collider", "Use the default scene collider (preferring meshes under Bmap) for raycast sampling."), autoSelect);
+                if (EditorGUI.EndChangeCheck())
+                {
+                    SetColliderSelectionForTerrain(terrain, newAutoSelect, heightSettings.colliderPath);
+                    heightSettings = GetHeightSettings(terrain);
+                    SceneView.RepaintAll();
+                }
+
+                Scene currentScene = SceneManager.GetActiveScene();
+
+                if (!heightSettings.autoSelectCollider)
+                {
+                    MeshCollider currentManualCollider = !string.IsNullOrEmpty(heightSettings.colliderPath)
+                        ? FindMeshColliderByPath(currentScene, heightSettings.colliderPath)
+                        : null;
+                    GameObject currentColliderObject = currentManualCollider != null ? currentManualCollider.gameObject : null;
+
+                    List<(string message, MessageType type)> colliderMessages = new List<(string, MessageType)>();
+
+                    EditorGUI.BeginChangeCheck();
+                    GameObject selectedColliderObject = (GameObject)EditorGUILayout.ObjectField(
+                        new GUIContent("Mesh Collider Object", "Select a GameObject with a MeshCollider in the active scene."),
+                        currentColliderObject,
+                        typeof(GameObject),
+                        true);
+                    if (EditorGUI.EndChangeCheck())
+                    {
+                        if (selectedColliderObject == null)
+                        {
+                            SetColliderSelectionForTerrain(terrain, true, string.Empty);
+                            heightSettings = GetHeightSettings(terrain);
+                            SceneView.RepaintAll();
+                            currentManualCollider = null;
+                            currentColliderObject = null;
+                        }
+                        else if (selectedColliderObject.scene != currentScene)
+                        {
+                            colliderMessages.Add(("Selected GameObject must belong to the active scene.", MessageType.Error));
+                        }
+                        else
+                        {
+                            MeshCollider selectedCollider = selectedColliderObject.GetComponent<MeshCollider>();
+                            if (selectedCollider == null || selectedCollider.sharedMesh == null)
+                            {
+                                colliderMessages.Add(("Selected GameObject must have a MeshCollider with a valid mesh.", MessageType.Error));
+                            }
+                            else
+                            {
+                                string selectedPath = GetTransformPath(selectedCollider.transform);
+                                SetColliderSelectionForTerrain(terrain, false, selectedPath);
+                                heightSettings = GetHeightSettings(terrain);
+                                SceneView.RepaintAll();
+                                currentManualCollider = selectedCollider;
+                                currentColliderObject = selectedCollider.gameObject;
+                            }
+                        }
+                    }
+
+                    if (!string.IsNullOrEmpty(heightSettings.colliderPath))
+                    {
+                        if (currentManualCollider == null)
+                        {
+                            colliderMessages.Add(($"MeshCollider '{heightSettings.colliderPath}' is not present in the active scene. Auto selection will be used as a fallback while sampling.", MessageType.Warning));
+                        }
+                        else
+                        {
+                            EditorGUILayout.LabelField(new GUIContent("Resolved Collider", "Collider currently used for raycast sampling."), new GUIContent(GetTransformPath(currentManualCollider.transform)));
+                        }
+                    }
+                    else
+                    {
+                        colliderMessages.Add(("No collider selected. Auto selection will be used as a fallback while sampling.", MessageType.Info));
+                    }
+
+                    List<MeshCollider> sceneColliders = GetSceneColliders(currentScene);
+                    if (sceneColliders.Count == 0)
+                    {
+                        colliderMessages.Add(("No MeshCollider found in the active scene. Raycast sampling will fall back to the fixed offset.", MessageType.Warning));
+                    }
+
+                    foreach (var message in colliderMessages)
+                    {
+                        EditorGUILayout.HelpBox(message.message, message.type);
+                    }
+                }
+                else
+                {
+                    MeshCollider defaultCollider = FindDefaultMeshCollider(currentScene);
+                    string info = defaultCollider != null ? GetTransformPath(defaultCollider.transform) : "<none>";
+                    EditorGUILayout.LabelField(new GUIContent("Auto Collider", "Collider currently selected for raycast sampling."), new GUIContent(info));
+                    if (defaultCollider == null)
+                    {
+                        EditorGUILayout.HelpBox("No MeshCollider found in the active scene. Raycast sampling will fall back to the fixed offset.", MessageType.Warning);
+                    }
+                }
+
+                EditorGUI.indentLevel--;
+            }
+        }
+
+        private void OnGUI()
+        {
+            scrollPosition = EditorGUILayout.BeginScrollView(scrollPosition);
+            
+            EditorGUILayout.Space(10);
+            EditorGUILayout.LabelField("Terrain Paint Tool", EditorStyles.boldLabel);
+            EditorGUILayout.Space(5);
+
+            EditorGUILayout.LabelField("Editor Mode", EditorStyles.miniBoldLabel);
+            EditorGUI.BeginChangeCheck();
+            int modeIndex = GUILayout.Toolbar((int)sharedMode, new[] { "Terrain", "Off" });
+            if (EditorGUI.EndChangeCheck())
+            {
+                SetSharedEditorMode((SharedEditorMode)modeIndex);
+            }
+            EditorGUILayout.Space(6);
+
+            // Top-level tabs
+            uiTabIndex = GUILayout.Toolbar(uiTabIndex, new[] { "Main", "Settings", "Advanced" });
+            EditorGUILayout.Space(6);
+            // MAIN PAGE header controls
+            if (uiTabIndex == 0)
+            {
+                // Terrain Selection (always visible)
+                EditorGUILayout.Space(10);
+                Type terrainType = TerrainAssetAdapter.MapTerrainType ?? typeof(ScriptableObject);
+                ScriptableObject currentAsset = selectedTerrain?.Asset;
+
+                EditorGUILayout.BeginHorizontal();
+                EditorGUI.BeginChangeCheck();
+                ScriptableObject newAsset = (ScriptableObject)EditorGUILayout.ObjectField(
+                    "Selected Terrain",
+                    currentAsset,
+                    terrainType,
+                    false);
+                if (EditorGUI.EndChangeCheck())
+                {
+                    SetSelectedTerrain(TerrainAssetAdapter.FromObject(newAsset));
+                    paintableTerrainsDirty = true;
+                }
+
+                if (GUILayout.Button("Read from MapSetting", GUILayout.Width(170)))
+                {
+                    LoadTerrainFromActiveScene();
+                }
+                EditorGUILayout.EndHorizontal();
+
+                EditorGUILayout.Space(5);
+
+                if (selectedTerrain != null)
+                {
+                    EditorGUI.BeginChangeCheck();
+                    bool newFoldout = EditorGUILayout.Foldout(
+                        gridHeightFoldout,
+                        new GUIContent("Grid Height and Sampling", "Adjust overlay height, raycast mode, and collider selection."),
+                        true);
+                    if (EditorGUI.EndChangeCheck())
+                    {
+                        gridHeightFoldout = newFoldout;
+                        EditorPrefs.SetBool(PREFS_GRID_HEIGHT_FOLDOUT, gridHeightFoldout);
+                    }
+
+                    if (gridHeightFoldout)
+                    {
+                        EditorGUI.indentLevel++;
+                        DrawGridHeightControls(selectedTerrain);
+                        EditorGUI.indentLevel--;
+                    }
+                }
+            }
+            
+            // SETTINGS PAGE
+            if (uiTabIndex == 1)
+            {
+                EditorGUILayout.Space(10);
+                EditorGUILayout.LabelField("Settings", EditorStyles.boldLabel);
+                EditorGUI.BeginChangeCheck();
+                
+                EditorGUILayout.LabelField("Display", EditorStyles.miniBoldLabel);
+                displayMode = (DisplayMode)EditorGUILayout.EnumPopup("Display Mode", displayMode);
+                // Color settings are always shown
+                {
+                    EditorGUILayout.LabelField("Tile Color Settings", EditorStyles.miniBoldLabel);
+                    colorOpacity = EditorGUILayout.Slider("Tile Opacity", colorOpacity, 0.1f, 1f);
+                    colorBrightness = EditorGUILayout.Slider("Tile Brightness", colorBrightness, 0.1f, 2f);
+                    if (!TerrainDefinitions.HasDefinitions)
+                    {
+                        EditorGUILayout.HelpBox(
+                            $"Terrain definitions not found at '{TerrainDefinitions.TerrainXmlAssetRelativePath}'. Extract terrain.xml.bundle via the Chapter Dumper to enable named labels and colors.",
+                            MessageType.Info);
+                    }
+                }
+                showGridLines = EditorGUILayout.Toggle("Show Grid Lines", showGridLines);
+                gridColor = EditorGUILayout.ColorField("Grid Color", gridColor);
+                gridThickness = EditorGUILayout.Slider("Grid Thickness", gridThickness, 0.5f, 50f);
+
+                EditorGUILayout.Space(5);
+                EditorGUILayout.LabelField("Hover Labels", EditorStyles.miniBoldLabel);
+                textDisplayMode = (TextDisplayMode)EditorGUILayout.EnumPopup("Display", textDisplayMode);
+                textSize = EditorGUILayout.Slider("Text Size", textSize, 0.1f, 3f);
+
+                if (EditorGUI.EndChangeCheck())
+                {
+                    SaveSettings();
+                    SceneView.RepaintAll();
+                }
+
+                EditorGUILayout.Space(10);
+                if (GUILayout.Button("Reset Display Settings"))
+                {
+                    textSize = 1.5f;
+                    textColor = Color.white;
+                    gridColor = new Color(1f, 1f, 1f, 0.3f);
+                    gridThickness = 1f;
+                    worldOffset = Vector3.zero;
+                    SaveSettings();
+                    SceneView.RepaintAll();
+                }
+
+                // (removed) Zoom metric debug log
+            }
+            
+            // Brush Painting Section
+            if (uiTabIndex == 0 && selectedTerrain != null)
+            {
+                EditorGUILayout.Space(10);
+                EditorGUILayout.LabelField("Terrain Painting", EditorStyles.boldLabel);
+
+                if (!TerrainDefinitions.HasDefinitions || !TerrainLocalizer.HasLocalization)
+                {
+                    string missingItems = "";
+                    if (!TerrainDefinitions.HasDefinitions && !TerrainLocalizer.HasLocalization)
+                    {
+                        missingItems = "Terrain definitions and localization are missing.";
+                    }
+                    else if (!TerrainDefinitions.HasDefinitions)
+                    {
+                        missingItems = "Terrain definitions are missing.";
+                    }
+                    else
+                    {
+                        missingItems = "Terrain name localization is missing.";
+                    }
+
+                    EditorGUILayout.HelpBox(
+                        $"{missingItems} Extract terrain data so palette colors, names, and localization load correctly.",
+                        MessageType.Warning);
+                    if (GUILayout.Button("Extract Terrain Data"))
+                    {
+                        ExtractTerrainData();
+                    }
+                    EditorGUILayout.Space(5);
+                }
+                    
+                EditorGUI.BeginChangeCheck();
+                    
+                    bool terrainModeActive = IsTerrainEditingEnabled;
+                    bool disablePaintingControls = !terrainModeActive;
+                    EditorGUI.BeginDisabledGroup(disablePaintingControls);
+                    
+                    bool terrainAssetDirty = selectedTerrain?.Asset != null && EditorUtility.IsDirty(selectedTerrain.Asset);
+
+                    EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+                    EditorGUILayout.LabelField(
+                        terrainAssetDirty ? "*Unsaved terrain changes." : "No changes to save.",
+                        EditorStyles.wordWrappedMiniLabel);
+                    EditorGUI.BeginDisabledGroup(!terrainAssetDirty);
+                    if (GUILayout.Button("Save Terrain Asset (⌘S / Ctrl+S)"))
+                    {
+                        SaveSelectedTerrainAsset();
+                        Repaint();
+                    }
+                    EditorGUI.EndDisabledGroup();
+                    EditorGUILayout.EndVertical();
+                    EditorGUILayout.Space(5);
+
+                    GUI.backgroundColor = paintMode ? Color.green : Color.white;
+                    string paintButtonLabel;
+                    if (!paintMode)
+                    {
+                        paintButtonLabel = "Enter Paint Mode";
+                    }
+                    else if (terrainAssetDirty)
+                    {
+                        paintButtonLabel = "Save and Exit Paint Mode";
+                    }
+                    else
+                    {
+                        paintButtonLabel = "Exit Paint Mode";
+                    }
+
+                    bool paintButtonClicked = GUILayout.Button(paintButtonLabel);
+                    GUI.backgroundColor = Color.white;
+
+                    if (paintButtonClicked)
+                    {
+                        if (paintMode && terrainAssetDirty)
+                        {
+                            SaveSelectedTerrainAsset();
+                            Repaint();
+                        }
+
+                        paintMode = !paintMode;
+                        if (paintMode)
+                        {
+                            // Make sure we have a default terrain selected. Prefer Ground when
+                            // available — paintableTerrains[0] is just whatever's first in the
+                            // XML (TID_OffLimits in stock data) which is a confusing default.
+                            if (IsEmptyTerrain(selectedBrushTerrain))
+                            {
+                                selectedBrushTerrain = ChooseDefaultBrushTerrain();
+                            }
+                        }
+                        SceneView.RepaintAll();
+                    }
+                    
+                    if (paintMode)
+                    {
+                        EditorGUILayout.Space(5);
+
+                    // Status: Hovering over
+                    EditorGUILayout.BeginHorizontal();
+                    EditorGUILayout.LabelField("Hovering over:", GUILayout.Width(100));
+                    string hoveredIdForPanel = null;
+                    var hoverGrid = GetVirtualGrid(selectedTerrain);
+                    if (isMouseOverGrid && selectedTerrain != null && hoverGrid != null)
+                    {
+                        hoveredIdForPanel = hoverGrid.GetTerrainId(hoveredTile.x, hoveredTile.y);
+                    }
+                        if (!IsEmptyTerrain(hoveredIdForPanel))
+                        {
+                            Color hColor = GetBaseTerrainColor(hoveredIdForPanel);
+                            Rect colorRectH = GUILayoutUtility.GetRect(20, 20, GUILayout.Width(20));
+                            EditorGUI.DrawRect(colorRectH, hColor);
+                            EditorGUI.DrawRect(colorRectH, new Color(0, 0, 0, 0.2f));
+
+                            string displayNameH = TerrainDefinitions.GetDisplayString(hoveredIdForPanel);
+                            EditorGUILayout.LabelField(displayNameH, EditorStyles.boldLabel);
+                        }
+                        else
+                        {
+                            // Draw blank color chip to maintain consistent layout
+                            Rect blankRectH = GUILayoutUtility.GetRect(20, 20, GUILayout.Width(20));
+                            EditorGUI.DrawRect(blankRectH, new Color(0.3f, 0.3f, 0.3f, 0.2f));
+                            EditorGUI.DrawRect(blankRectH, new Color(0, 0, 0, 0.2f));
+                            EditorGUILayout.LabelField("None", EditorStyles.boldLabel);
+                        }
+                    EditorGUILayout.EndHorizontal();
+
+                    EditorGUILayout.Space(2);
+
+                    // Painting with (selected brush) with color chip
+                    EditorGUILayout.BeginHorizontal();
+                    EditorGUILayout.LabelField("Painting with:", GUILayout.Width(100));
+                    
+                    if (!IsEmptyTerrain(selectedBrushTerrain))
+                    {
+                        Color terrainColor = GetBaseTerrainColor(selectedBrushTerrain);
+                        Rect colorRect = GUILayoutUtility.GetRect(20, 20, GUILayout.Width(20));
+                        EditorGUI.DrawRect(colorRect, terrainColor);
+                        EditorGUI.DrawRect(colorRect, new Color(0, 0, 0, 0.2f)); // Border
+
+                        string displayName = TerrainDefinitions.GetDisplayString(selectedBrushTerrain);
+                        EditorGUILayout.LabelField(displayName, EditorStyles.boldLabel);
+                    }
+                    else
+                    {
+                        Rect blankRect = GUILayoutUtility.GetRect(20, 20, GUILayout.Width(20));
+                        EditorGUI.DrawRect(blankRect, new Color(0.3f, 0.3f, 0.3f, 0.2f));
+                        EditorGUI.DrawRect(blankRect, new Color(0, 0, 0, 0.2f));
+                        EditorGUILayout.LabelField("None", EditorStyles.boldLabel);
+                    }
+                    EditorGUILayout.EndHorizontal();
+                    
+                    EditorGUILayout.Space(5);
+                    EditorGUILayout.LabelField("Terrain Palette", EditorStyles.miniBoldLabel);
+
+                    HashSet<string> usedTerrains = new HashSet<string>();
+                    if (selectedTerrain != null && selectedTerrain.m_Terrains != null)
+                    {
+                        foreach (string tid in selectedTerrain.m_Terrains)
+                        {
+                            if (!IsEmptyTerrain(tid))
+                            {
+                                usedTerrains.Add(tid);
+                            }
+                        }
+                    }
+
+                    var allTypes = GetPaintableTerrains();
+                    var usedList = new List<TerrainType>();
+                    if (usedTerrains.Count > 0)
+                    {
+                        foreach (var terrain in allTypes)
+                        {
+                            if (terrain != null && usedTerrains.Contains(terrain.tid))
+                            {
+                                usedList.Add(terrain);
+                            }
+                        }
+                        usedList.Sort((a, b) => string.Compare(a.tid, b.tid, StringComparison.OrdinalIgnoreCase));
+                    }
+
+                    if (usedList.Count > 0)
+                    {
+                        EditorGUILayout.LabelField($"Used in Map ({usedList.Count})", EditorStyles.miniBoldLabel);
+                        EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+                        foreach (var terrain in usedList)
+                        {
+                            DrawTerrainButton(terrain, true, false);
+                        }
+                        EditorGUILayout.EndVertical();
+                        EditorGUILayout.Space(5);
+                    }
+
+                    EditorGUILayout.HelpBox("★ marks terrains already present on the current map.", MessageType.None);
+                    EditorGUILayout.LabelField("All Terrains", EditorStyles.miniBoldLabel);
+                    EditorGUILayout.BeginHorizontal();
+                    EditorGUILayout.LabelField("Filter", GUILayout.Width(40));
+                    string newFilter = EditorGUILayout.TextField(terrainSearchFilter ?? string.Empty);
+                    if (!string.Equals(newFilter, terrainSearchFilter, StringComparison.Ordinal))
+                    {
+                        terrainSearchFilter = newFilter;
+                    }
+                    EditorGUILayout.EndHorizontal();
+
+                    string filterLower = string.IsNullOrEmpty(terrainSearchFilter)
+                        ? null
+                        : terrainSearchFilter.ToLowerInvariant();
+
+                    paletteScrollPosition = EditorGUILayout.BeginScrollView(paletteScrollPosition, GUILayout.Height(200));
+                    EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+
+                    if (allTypes.Count == 0)
+                    {
+                        string message = TerrainDefinitions.HasDefinitions
+                            ? "No paintable terrains detected in the current selection."
+                            : $"Terrain palette is empty. Extract {TerrainDefinitions.TerrainXmlAssetRelativePath} or sample an existing tile to build a palette.";
+                        EditorGUILayout.HelpBox(message, MessageType.Info);
+                    }
+                    else
+                    {
+                        foreach (var terrain in allTypes)
+                        {
+                            if (terrain == null || string.IsNullOrEmpty(terrain.tid))
+                            {
+                                continue;
+                            }
+
+                            if (filterLower != null)
+                            {
+                                bool matchesTid = terrain.tid.ToLowerInvariant().Contains(filterLower);
+                                bool matchesMtid = !string.IsNullOrEmpty(terrain.name) && terrain.name.ToLowerInvariant().Contains(filterLower);
+                                string localizedName = TerrainDefinitions.GetTerrainName(terrain.tid);
+                                bool matchesLocalizedName = !string.IsNullOrEmpty(localizedName) && localizedName.ToLowerInvariant().Contains(filterLower);
+                                if (!matchesTid && !matchesMtid && !matchesLocalizedName)
+                                {
+                                    continue;
+                                }
+                            }
+
+                            bool isUsed = usedTerrains.Contains(terrain.tid);
+                            DrawTerrainButton(terrain, isUsed, true);
+                        }
+                    }
+
+                    EditorGUILayout.EndVertical();
+                    EditorGUILayout.EndScrollView();
+
+                    EditorGUILayout.Space(5);
+                    EditorGUILayout.BeginHorizontal();
+                    if (GUILayout.Button("Swap Terrains..."))
+                    {
+                        SwapTerrainDialog.Show(selectedTerrain, GetPaintableTerrains());
+                    }
+                    if (GUILayout.Button("Minimap"))
+                    {
+                        TerrainMinimapWindow.ShowWindow();
+                    }
+                    EditorGUILayout.EndHorizontal();
+
+                    EditorGUILayout.HelpBox("Left Click: Paint | Shift+Click: Fill Island | Ctrl/Cmd+Click: Sample", MessageType.Info);
+                    }
+                    
+                    EditorGUI.EndDisabledGroup(); // End disable group for visualization check
+
+                    if (EditorGUI.EndChangeCheck())
+                    {
+                        SceneView.RepaintAll();
+                    }
+                }
+            
+            // ADVANCED PAGE
+            if (uiTabIndex == 2)
+            {
+                EditorGUILayout.Space(10);
+                EditorGUILayout.LabelField("Advanced Tools", EditorStyles.boldLabel);
+                
+                if (selectedTerrain == null)
+                {
+                    EditorGUILayout.HelpBox("Please select a terrain first in the Main tab.", MessageType.Info);
+                }
+                else
+                {
+                    DrawAdvancedTab();
+                }
+            }
+            
+            EditorGUILayout.EndScrollView();
+        }
+
+        private static float GetCameraDistance(SceneView sceneView, float terrainCenterX, float terrainCenterZ, float terrainY)
+        {
+            if (sceneView == null || sceneView.camera == null)
+                return 50f; // Default medium distance
+            
+            Vector3 terrainCenter = new Vector3(terrainCenterX, terrainY, terrainCenterZ);
+            Vector3 cameraPos = sceneView.camera.transform.position;
+            return Vector3.Distance(cameraPos, terrainCenter);
+        }
+
+        private static float CalculateWorldThickness(SceneView sceneView, Vector3 worldPosition, float pixelThickness)
+        {
+            if (sceneView == null || sceneView.camera == null || pixelThickness <= 0f)
+            {
+                return 0f;
+            }
+
+            Camera camera = sceneView.camera;
+
+            if (camera.orthographic)
+            {
+                float pixelSize = (camera.orthographicSize * 2f) / Mathf.Max(1f, camera.pixelHeight);
+                return pixelThickness * pixelSize;
+            }
+
+            Vector3 guiPoint = HandleUtility.WorldToGUIPoint(worldPosition);
+            Vector3 guiOffset = guiPoint + new Vector3(pixelThickness, 0f, 0f);
+            Ray ray = HandleUtility.GUIPointToWorldRay(guiPoint);
+            Ray rayOffset = HandleUtility.GUIPointToWorldRay(guiOffset);
+            Plane plane = new Plane(Vector3.up, worldPosition);
+            if (plane.Raycast(ray, out float enter) && plane.Raycast(rayOffset, out float enterOffset))
+            {
+                Vector3 p0 = ray.GetPoint(enter);
+                Vector3 p1 = rayOffset.GetPoint(enterOffset);
+                float projected = (p1 - p0).magnitude;
+                if (projected > 1e-6f)
+                {
+                    return projected;
+                }
+            }
+
+            float distance = Vector3.Distance(camera.transform.position, worldPosition);
+            float fov = camera.fieldOfView * Mathf.Deg2Rad;
+            float pixelWorldSize = 2f * distance * Mathf.Tan(fov * 0.5f) / Mathf.Max(1f, camera.pixelHeight);
+            return pixelThickness * pixelWorldSize;
+        }
+
+        private static void OnSceneGUI(SceneView sceneView)
+        {
+            if (sharedMode == SharedEditorMode.Off)
+            {
+                if (isPaintingStroke)
+                {
+                    EndPaintStroke();
+                }
+                isMouseOverGrid = false;
+                hoveredTile = new Vector2Int(-1, -1);
+                isSampleModeActiveCache = false;
+                PruneMeshCaches(selectedTerrain);
+                return;
+            }
+
+            if (selectedTerrain == null)
+            {
+                PruneMeshCaches(selectedTerrain);
+                return;
+            }
+
+            PruneMeshCaches(selectedTerrain);
+
+            TerrainVirtualGrid currentGrid = GetVirtualGrid(selectedTerrain);
+            if (currentGrid == null)
+                return;
+
+            int width = selectedTerrain.m_Width;
+            int height = selectedTerrain.m_Height;
+            float startX = selectedTerrain.m_X + worldOffset.x;
+            float startZ = selectedTerrain.m_Z + worldOffset.z;
+
+            TerrainHeightSettings heightSettings = GetHeightSettings(selectedTerrain);
+            TerrainHeightCache heightCache = heightSettings.mode == TerrainHeightMode.RaycastMesh ? GetOrBuildTerrainHeightCache(selectedTerrain, heightSettings) : null;
+            float basePlaneY = heightSettings.offset;
+
+            int lastColIndex = Mathf.Max(width - 1, 0);
+            int lastRowIndex = Mathf.Max(height - 1, 0);
+            int centerCol = width > 0 ? Mathf.Clamp(width / 2, 0, lastColIndex) : 0;
+            int centerRow = height > 0 ? Mathf.Clamp(height / 2, 0, lastRowIndex) : 0;
+            float centerHeight = ResolveTileHeight(heightCache, heightSettings, centerCol, centerRow);
+
+            float terrainCenterX = startX + (width * TILE_SIZE) / 2f;
+            float terrainCenterZ = startZ + (height * TILE_SIZE) / 2f;
+            float cameraDistance = GetCameraDistance(sceneView, terrainCenterX, terrainCenterZ, centerHeight);
+            Vector3 gridReferencePosition = new Vector3(terrainCenterX, centerHeight + 0.02f, terrainCenterZ);
+            currentGridThicknessWorld = showGridLines ? Mathf.Max(0.0005f, CalculateWorldThickness(sceneView, gridReferencePosition, gridThickness)) : 0f;
+            
+            float currentTime = (float)EditorApplication.timeSinceStartup;
+            float deltaTime = Mathf.Min(currentTime - lastFrameTime, 0.1f);
+            lastFrameTime = currentTime;
+            
+            if (sceneView.camera != null)
+            {
+                Vector3 currentCamPos = sceneView.camera.transform.position;
+                Quaternion currentCamRot = sceneView.camera.transform.rotation;
+                float currentFOV = sceneView.camera.fieldOfView;
+                
+                if (Vector3.Distance(currentCamPos, lastCameraPosition) > 0.01f ||
+                    Quaternion.Angle(currentCamRot, lastCameraRotation) > 0.1f ||
+                    Mathf.Abs(currentFOV - lastCameraFOV) > 0.1f)
+                {
+                    cameraIsMoving = true;
+                    cameraStillTime = 0f;
+                }
+                else
+                {
+                    cameraStillTime += deltaTime;
+                    if (cameraStillTime > cameraStillThreshold)
+                    {
+                        cameraIsMoving = false;
+                    }
+                }
+                
+                lastCameraPosition = currentCamPos;
+                lastCameraRotation = currentCamRot;
+                lastCameraFOV = currentFOV;
+            }
+            
+            HandleMouseInput(width, height, startX, startZ, basePlaneY, heightSettings);
+            
+            bool isRepaint = Event.current.type == EventType.Repaint;
+
+            justStartedMoving = (!wasCameraMoving && cameraIsMoving);
+            wasCameraMoving = cameraIsMoving;
+
+            if (isRepaint)
+            {
+                Mesh overlayMesh = GetOverlayMesh(selectedTerrain, currentGrid, heightCache, heightSettings);
+                if (overlayMesh != null)
+                {
+                    EnsureOverlayMaterial();
+                    overlayMaterial.SetPass(0);
+                    Graphics.DrawMeshNow(overlayMesh, Matrix4x4.identity);
+                }
+            }
+            
+            if (isRepaint && showGridLines && width > 0 && height > 0)
+            {
+                Mesh gridMesh = GetGridMesh(selectedTerrain, currentGrid, heightCache, heightSettings);
+                if (gridMesh != null && gridMesh.vertexCount > 0)
+                {
+                    EnsureOverlayMaterial();
+                    overlayMaterial.SetPass(0);
+                    Graphics.DrawMeshNow(gridMesh, Matrix4x4.identity);
+                }
+            }
+            
+            if (isRepaint)
+            {
+                List<TerrainIsland> islands = GetOrCreateIslands(selectedTerrain, cameraDistance);
+                foreach (var island in islands)
+                {
+                    if (IsEmptyTerrain(island.terrainId))
+                        continue;
+                    Color borderColor = GetBorderColor(island.terrainId);
+                    DrawIslandBorders(island, width, height, startX, startZ, heightCache, heightSettings, borderColor);
+                }
+            }
+            
+            HashSet<Vector2Int> currentHighlightRegion = null;
+            string highlightTerrainId = null;
+            if (isMouseOverGrid && hoveredTile.x >= 0 && hoveredTile.y >= 0)
+            {
+                string hoveredTerrainIdForHighlight = currentGrid.GetTerrainId(hoveredTile.x, hoveredTile.y);
+                if (!IsEmptyTerrain(hoveredTerrainIdForHighlight))
+                {
+                    bool isSampling = IsSamplingModifier(Event.current);
+                    bool isFilling = IsFillModifier(Event.current);
+                    if (paintMode && isFilling && !IsEmptyTerrain(selectedBrushTerrain))
+                    {
+                        // Fill preview: show entire island that would be filled
+                        if (hoveredTerrainIdForHighlight != selectedBrushTerrain)
+                        {
+                            currentHighlightRegion = TerrainRegionCache.GetSameTerrainRegion(selectedTerrain, currentGrid, hoveredTile, width, height, useCache: true);
+                            highlightTerrainId = selectedBrushTerrain;
+                        }
+                    }
+                    else if (paintMode && !isSampling && !isFilling && !IsEmptyTerrain(selectedBrushTerrain))
+                    {
+                        if (hoveredTerrainIdForHighlight == selectedBrushTerrain)
+                        {
+                            currentHighlightRegion = GetHoverConnectedRegion(selectedTerrain, currentGrid, hoveredTile, width, height);
+                            highlightTerrainId = selectedBrushTerrain;
+                        }
+                        else
+                        {
+                            var adjacent = FindAdjacentIsland(hoveredTile, selectedBrushTerrain, width, height);
+                            var tilesToHighlight = new HashSet<Vector2Int>(adjacent);
+                            int brushHalf = (brushSize - 1) / 2;
+                            for (int dx = -brushHalf; dx <= brushHalf; dx++)
+                            {
+                                for (int dz = -brushHalf; dz <= brushHalf; dz++)
+                                {
+                                    int x = hoveredTile.x + dx;
+                                    int z = hoveredTile.y + dz;
+                                    if (x >= 0 && x < width && z >= 0 && z < height)
+                                        tilesToHighlight.Remove(new Vector2Int(x, z));
+                                }
+                            }
+                            currentHighlightRegion = tilesToHighlight;
+                            highlightTerrainId = selectedBrushTerrain;
+                        }
+                    }
+                    else if (paintMode && isSampling && !IsEmptyTerrain(hoveredTerrainIdForHighlight))
+                    {
+                        currentHighlightRegion = new HashSet<Vector2Int> { hoveredTile };
+                        highlightTerrainId = hoveredTerrainIdForHighlight;
+                    }
+                    else if (!paintMode && !IsEmptyTerrain(hoveredTerrainIdForHighlight))
+                    {
+                        currentHighlightRegion = GetHoverConnectedRegion(selectedTerrain, currentGrid, hoveredTile, width, height);
+                        highlightTerrainId = hoveredTerrainIdForHighlight;
+                    }
+                }
+            }
+            
+            if (isRepaint && currentHighlightRegion != null && currentHighlightRegion.Count > 0)
+            {
+                DrawRegionHighlight(currentHighlightRegion, startX, startZ, heightCache, heightSettings, highlightTerrainId);
+            }
+
+            bool allowAnyLabels = displayMode != DisplayMode.ColorOnly;
+            bool showHoverLabel = false;
+            string hoveredTerrainId = "";
+            if (isMouseOverGrid && hoveredTile.x >= 0 && hoveredTile.y >= 0)
+            {
+                hoveredTerrainId = currentGrid.GetTerrainId(hoveredTile.x, hoveredTile.y);
+                if (!IsEmptyTerrain(hoveredTerrainId))
+                {
+                    showHoverLabel = true;
+                }
+            }
+
+            if (isRepaint)
+            {
+                if (s_LabelStyle == null) s_LabelStyle = new GUIStyle();
+                if (s_LabelStyleSmall == null) s_LabelStyleSmall = new GUIStyle();
+                if (s_LabelStyleHover == null) s_LabelStyleHover = new GUIStyle();
+                int baseFont = Mathf.RoundToInt(12 * textSize);
+                int smallFont = Mathf.Max(8, Mathf.RoundToInt(baseFont * 0.85f));
+                int hoverFont = Mathf.RoundToInt(14 * textSize);
+                s_LabelStyle.alignment = TextAnchor.MiddleCenter;
+                s_LabelStyle.fontStyle = FontStyle.Bold;
+                s_LabelStyle.fontSize = baseFont;
+                s_LabelStyleSmall.alignment = TextAnchor.MiddleCenter;
+                s_LabelStyleSmall.fontStyle = FontStyle.Bold;
+                s_LabelStyleSmall.fontSize = smallFont;
+                s_LabelStyleHover.alignment = TextAnchor.MiddleLeft;
+                s_LabelStyleHover.fontStyle = FontStyle.Bold;
+                s_LabelStyleHover.fontSize = hoverFont;
+
+                s_LabelTextCache.Clear();
+                s_LabelFrameKeys.Clear();
+                s_FrameLabelNodes.Clear();
+                s_LabelRemovalBuffer.Clear();
+
+                if (allowAnyLabels)
+                {
+                    List<TerrainIsland> islands = GetOrCreateIslands(selectedTerrain, cameraDistance);
+                    Handles.BeginGUI();
+
+                    foreach (var island in islands)
+                    {
+                        if (IsEmptyTerrain(island.terrainId))
+                            continue;
+                        if (showHoverLabel && island.ContainsTile(hoveredTile))
+                            continue;
+
+                        foreach (var labelPos in island.labelPositions)
+                        {
+                            float centerX = startX + labelPos.x * TILE_SIZE + TILE_SIZE * 0.5f;
+                            float centerZ = startZ + labelPos.y * TILE_SIZE + TILE_SIZE * 0.5f;
+                            int labelCol = Mathf.Clamp(Mathf.RoundToInt(labelPos.x), 0, lastColIndex);
+                            int labelRow = Mathf.Clamp(Mathf.RoundToInt(labelPos.y), 0, lastRowIndex);
+                            float labelHeight = ResolveTileHeight(heightCache, heightSettings, labelCol, labelRow) + 0.02f;
+                            Vector3 worldPos = new Vector3(centerX, labelHeight, centerZ);
+
+                            string textKey = island.terrainId + "|" + textDisplayMode;
+                            if (!s_LabelTextCache.TryGetValue(textKey, out string displayText))
+                            {
+                                displayText = GetTerrainDisplayText(island.terrainId);
+                                s_LabelTextCache[textKey] = displayText;
+                            }
+
+                            Color labelColor = ResolveLabelColor(island.terrainId);
+                            if (displayMode == DisplayMode.ColorOnly) continue;
+                            GUIStyle styleRef = s_LabelStyle;
+                            styleRef.normal.textColor = labelColor;
+
+                            Vector2 anchorGui = HandleUtility.WorldToGUIPoint(worldPos);
+                            s_LabelContent.text = displayText;
+                            Vector2 size = styleRef.CalcSize(s_LabelContent);
+                            float totalWidth = size.x + LABEL_ICON_SIZE + LABEL_ICON_PADDING * 2f;
+                            float totalHeight = size.y;
+
+                            string nodeKey = island.terrainId + "|" + Mathf.RoundToInt(labelPos.x) + "x" + Mathf.RoundToInt(labelPos.y) + "|" + (int)textDisplayMode;
+                            s_LabelFrameKeys.Add(nodeKey);
+                            bool nodeExisted = s_LabelNodes.TryGetValue(nodeKey, out var node);
+                            if (!nodeExisted)
+                            {
+                                node = new LabelNode { key = nodeKey, posGui = anchorGui, preservedOffset = Vector2.zero };
+                                s_LabelNodes[nodeKey] = node;
+                            }
+                            Vector2 prevOffset = nodeExisted ? (node.posGui - node.anchorGui) : Vector2.zero;
+                            node.anchorGui = anchorGui;
+                            node.width = totalWidth;
+                            node.height = totalHeight;
+                            node.seenThisFrame = true;
+
+                            node.posGui = anchorGui;
+                            if (RelaxEnabled)
+                            {
+                                node.priority = island.tiles.Count >= RelaxLargeIslandTiles ? RelaxPriorityLarge : 1f;
+                                node.preservedOffset = prevOffset;
+                                s_FrameLabelNodes.Add(node);
+                            }
+                        }
+                    }
+
+                    if (RelaxEnabled)
+                    {
+                        RelaxLabelPositions(s_FrameLabelNodes, deltaTime, justStartedMoving, cameraIsMoving, cameraDistance, width, height);
+                    }
+
+                    foreach (var island in islands)
+                    {
+                        if (IsEmptyTerrain(island.terrainId)) continue;
+                        if (showHoverLabel && island.ContainsTile(hoveredTile)) continue;
+
+                        foreach (var labelPos in island.labelPositions)
+                        {
+                            float centerX = startX + labelPos.x * TILE_SIZE + TILE_SIZE * 0.5f;
+                            float centerZ = startZ + labelPos.y * TILE_SIZE + TILE_SIZE * 0.5f;
+                            int labelCol = Mathf.Clamp(Mathf.RoundToInt(labelPos.x), 0, lastColIndex);
+                            int labelRow = Mathf.Clamp(Mathf.RoundToInt(labelPos.y), 0, lastRowIndex);
+                            float labelHeight = ResolveTileHeight(heightCache, heightSettings, labelCol, labelRow) + 0.02f;
+                            Vector3 worldPos = new Vector3(centerX, labelHeight, centerZ);
+
+                            string textKey = island.terrainId + "|" + textDisplayMode;
+                            if (!s_LabelTextCache.TryGetValue(textKey, out string displayText))
+                            {
+                                displayText = GetTerrainDisplayText(island.terrainId);
+                                s_LabelTextCache[textKey] = displayText;
+                            }
+                            Color labelColor = ResolveLabelColor(island.terrainId);
+                            if (displayMode == DisplayMode.ColorOnly) continue;
+                            GUIStyle styleRef = s_LabelStyle;
+                            styleRef.normal.textColor = labelColor;
+
+                            string nodeKey = island.terrainId + "|" + Mathf.RoundToInt(labelPos.x) + "x" + Mathf.RoundToInt(labelPos.y) + "|" + (int)textDisplayMode;
+                            if (s_LabelNodes.TryGetValue(nodeKey, out var node))
+                            {
+                                DrawLabelWithColoredIconAtGui(worldPos, node.posGui, displayText, island.terrainId, styleRef, labelColor, 1f);
+                            }
+                            else
+                            {
+                                Vector2 anchorGui = HandleUtility.WorldToGUIPoint(worldPos);
+                                DrawLabelWithColoredIconAtGui(worldPos, anchorGui, displayText, island.terrainId, styleRef, labelColor, 1f);
+                            }
+                        }
+                    }
+
+                    foreach (var kv in s_LabelNodes)
+                    {
+                        if (!s_LabelFrameKeys.Contains(kv.Key))
+                        {
+                            s_LabelRemovalBuffer.Add(kv.Key);
+                        }
+                        else
+                        {
+                            kv.Value.seenThisFrame = false;
+                        }
+                    }
+
+                    for (int i = 0; i < s_LabelRemovalBuffer.Count; i++)
+                    {
+                        s_LabelNodes.Remove(s_LabelRemovalBuffer[i]);
+                    }
+                    s_LabelFrameKeys.Clear();
+                    s_FrameLabelNodes.Clear();
+                    s_LabelRemovalBuffer.Clear();
+
+                    Handles.EndGUI();
+                }
+            }
+
+            if (isRepaint && showHoverLabel && !paintMode)
+            {
+                float hoverX = startX + hoveredTile.x * TILE_SIZE + TILE_SIZE * 0.5f;
+                float hoverZ = startZ + hoveredTile.y * TILE_SIZE + TILE_SIZE * 0.5f;
+                int hoverCol = Mathf.Clamp(hoveredTile.x, 0, lastColIndex);
+                int hoverRow = Mathf.Clamp(hoveredTile.y, 0, lastRowIndex);
+                float hoverHeight = ResolveTileHeight(heightCache, heightSettings, hoverCol, hoverRow) + 0.05f;
+                Vector3 hoverPos = new Vector3(hoverX, hoverHeight, hoverZ);
+                string hoverDisplayText = GetTerrainDisplayText(hoveredTerrainId);
+                Color hoverLabelColor = ResolveLabelColor(hoveredTerrainId, false);
+                if (s_LabelStyleHover == null) s_LabelStyleHover = new GUIStyle();
+                GUIStyle hoverStyle = s_LabelStyleHover;
+                hoverStyle.alignment = TextAnchor.MiddleLeft;
+                hoverStyle.fontStyle = FontStyle.Bold;
+                hoverStyle.fontSize = Mathf.RoundToInt(14 * textSize);
+                hoverStyle.normal.textColor = hoverLabelColor;
+                Handles.BeginGUI();
+                DrawLabelWithColoredIcon(hoverPos, hoverDisplayText, hoveredTerrainId, hoverStyle, hoverLabelColor);
+                Handles.EndGUI();
+            }
+
+            if (paintMode && isMouseOverGrid)
+            {
+                DrawBrushPreview(hoveredTile, width, height, startX, startZ, heightCache, heightSettings);
+            }
+
+            if (uiTabIndex == 2 && selectedTerrain != null)
+            {
+                if (newTerrainWidth != width || newTerrainHeight != height)
+                {
+                    DrawResizePreview(width, height, startX, startZ, heightCache, heightSettings);
+                }
+
+                if (previewTerrains != null && (mirrorPreviewMode != MirrorMode.None || shiftPreviewMode != ShiftDirection.None))
+                {
+                    DrawAdvancedOperationPreview(width, height, startX, startZ, heightCache, heightSettings);
+                }
+            }
+
+            if (cameraIsMoving || cameraStillTime < 1f)
+            {
+                sceneView.Repaint();
+            }
+        }
+
+        private static bool isPaintingStroke = false;
+        private static int paintUndoGroup = -1;
+        private static HashSet<int> paintedIndicesThisDrag = new HashSet<int>();
+
+        private static HashSet<Vector2Int> GetHoverConnectedRegion(
+            TerrainAssetAdapter terrain,
+            TerrainVirtualGrid grid,
+            Vector2Int tile,
+            int width,
+            int height)
+        {
+            if (terrain == null || grid == null)
+            {
+                return new HashSet<Vector2Int>();
+            }
+
+            return TerrainRegionCache.GetSameTerrainRegion(terrain, grid, tile, width, height, useCache: true);
+        }
+
+        private static void RelaxLabelPositions(
+            List<LabelNode> nodes,
+            float deltaTime,
+            bool justStartedMoving,
+            bool cameraIsMoving,
+            float cameraDistance,
+            int terrainWidth,
+            int terrainHeight)
+        {
+            if (nodes == null || nodes.Count == 0)
+            {
+                return;
+            }
+
+            foreach (var node in nodes)
+            {
+                if (RelaxFreezeWhileMoving && cameraIsMoving && !justStartedMoving)
+                {
+                    node.posGui = node.anchorGui + node.preservedOffset;
+                }
+                else
+                {
+                    node.posGui = Vector2.Lerp(node.posGui, node.anchorGui, RelaxAnchorK);
+                }
+            }
+        }
+
+        private static void BeginPaintStroke()
+        {
+            if (isPaintingStroke || selectedTerrain == null) return;
+            Undo.IncrementCurrentGroup();
+            Undo.SetCurrentGroupName("Paint Terrain");
+            paintUndoGroup = Undo.GetCurrentGroup();
+            if (selectedTerrain.Asset != null)
+            {
+                Undo.RegisterCompleteObjectUndo(selectedTerrain.Asset, "Paint Terrain");
+            }
+            paintedIndicesThisDrag.Clear();
+            isPaintingStroke = true;
+        }
+
+        private static void EndPaintStroke()
+        {
+            if (!isPaintingStroke) return;
+            if (paintUndoGroup >= 0)
+            {
+                Undo.CollapseUndoOperations(paintUndoGroup);
+                paintUndoGroup = -1;
+            }
+            isPaintingStroke = false;
+            paintedIndicesThisDrag.Clear();
+        }
+
+        private static void HandleMouseInput(int width, int height, float startX, float startZ, float basePlaneY, TerrainHeightSettings heightSettings)
+        {
+            Event currentEvent = Event.current;
+            if (!IsTerrainEditingEnabled)
+            {
+                isMouseOverGrid = false;
+                hoveredTile = new Vector2Int(-1, -1);
+                isSampleModeActiveCache = false;
+                if (isPaintingStroke)
+                {
+                    EndPaintStroke();
+                }
+                return;
+            }
+            Vector2Int prevHovered = hoveredTile;
+            bool prevOver = isMouseOverGrid;
+
+            Ray ray = HandleUtility.GUIPointToWorldRay(currentEvent.mousePosition);
+
+            Vector3? intersection = null;
+            bool useMeshRaycast = heightSettings != null && heightSettings.mode == TerrainHeightMode.RaycastMesh;
+            if (useMeshRaycast)
+            {
+                string hoverColliderPath;
+                MeshCollider collider = GetSceneMeshCollider(SceneManager.GetActiveScene(), heightSettings, selectedTerrain, false, out hoverColliderPath);
+                if (collider != null && collider.Raycast(ray, out RaycastHit meshHit, 10000f))
+                {
+                    intersection = meshHit.point;
+                }
+            }
+
+            if (!intersection.HasValue)
+            {
+                float denom = ray.direction.y;
+                if (Mathf.Approximately(denom, 0f))
+                {
+                    isMouseOverGrid = false;
+                    isSampleModeActiveCache = false;
+                    return;
+                }
+
+                float distance = (basePlaneY - ray.origin.y) / denom;
+                if (distance < 0f)
+                {
+                    isMouseOverGrid = false;
+                    isSampleModeActiveCache = false;
+                    return;
+                }
+
+                intersection = ray.origin + ray.direction * distance;
+            }
+
+            Vector3 hitPoint = intersection.Value;
+            int gridX = Mathf.FloorToInt((hitPoint.x - startX) / TILE_SIZE);
+            int gridZ = Mathf.FloorToInt((hitPoint.z - startZ) / TILE_SIZE);
+
+            if (gridX < 0 || gridX >= width || gridZ < 0 || gridZ >= height)
+            {
+                isMouseOverGrid = false;
+                isSampleModeActiveCache = false;
+                if (isPaintingStroke)
+                {
+                    EndPaintStroke();
+                }
+                return;
+            }
+
+            hoveredTile = new Vector2Int(gridX, gridZ);
+            isMouseOverGrid = true;
+
+            // Update sample mode cache for external windows (e.g., minimap)
+            isSampleModeActiveCache = paintMode && IsSamplingModifier(currentEvent);
+
+            if (paintMode && IsTerrainEditingEnabled)
+            {
+                if (currentEvent.type == EventType.MouseDown || currentEvent.type == EventType.MouseDrag || currentEvent.type == EventType.MouseUp)
+                {
+                    if (currentEvent.button == 0)
+                    {
+                        if (IsSamplingModifier(currentEvent) && currentEvent.type == EventType.MouseDown)
+                        {
+                            PickTerrain(hoveredTile, width);
+                        }
+                        else if (IsFillModifier(currentEvent) && currentEvent.type == EventType.MouseDown)
+                        {
+                            FillIsland(hoveredTile, width, height);
+                        }
+                        else
+                        {
+                            if (currentEvent.type == EventType.MouseDown)
+                            {
+                                BeginPaintStroke();
+                                PaintTerrainDedup(hoveredTile, width, height);
+                            }
+                            else if (currentEvent.type == EventType.MouseDrag && isPaintingStroke)
+                            {
+                                PaintTerrainDedup(hoveredTile, width, height);
+                            }
+                            else if (currentEvent.type == EventType.MouseUp && isPaintingStroke)
+                            {
+                                EndPaintStroke();
+                            }
+                        }
+                        currentEvent.Use();
+                    }
+                }
+
+                if (currentEvent.type == EventType.Layout && currentEvent.button == 0)
+                {
+                    HandleUtility.AddDefaultControl(GUIUtility.GetControlID(FocusType.Passive));
+                }
+            }
+
+            if (isMouseOverGrid != prevOver || hoveredTile != prevHovered)
+            {
+                SceneView.RepaintAll();
+                if (instance != null)
+                {
+                    instance.Repaint();
+                }
+            }
+        }
+
+        private static void PaintTerrainDedup(Vector2Int centerTile, int width, int height)
+        {
+            if (IsEmptyTerrain(selectedBrushTerrain) || selectedTerrain == null) return;
+            TerrainVirtualGrid grid = GetVirtualGrid(selectedTerrain);
+            if (grid == null) return;
+
+            int expectedCount = width * height;
+            if (expectedCount <= 0) return;
+
+            var tiles = selectedTerrain.m_Terrains;
+            tiles = EnsureTerrainArrayCapacity(selectedTerrain, tiles, expectedCount);
+
+            int halfSize = (brushSize - 1) / 2;
+            bool modified = false;
+
+            for (int dx = -halfSize; dx <= halfSize; dx++)
+            {
+                for (int dz = -halfSize; dz <= halfSize; dz++)
+                {
+                    int tileX = centerTile.x + dx;
+                    int tileZ = centerTile.y + dz;
+                    if (tileX >= 0 && tileX < width && tileZ >= 0 && tileZ < height)
+                    {
+                        int virtualIndex = tileZ * width + tileX;
+                        int actualIndex = grid.GetActualIndex(tileX, tileZ);
+                        bool isTailCell = grid.IsTailIndex(virtualIndex);
+
+                        if (actualIndex < 0)
+                        {
+                            if (!isTailCell)
+                            {
+                                continue;
+                            }
+
+                            tiles = EnsureTerrainArrayCapacity(selectedTerrain, tiles, expectedCount);
+                            if (virtualIndex >= tiles.Length)
+                            {
+                                continue;
+                            }
+                            if (ConvertTrailingEmptyToNoEntry(tiles))
+                            {
+                                modified = true;
+                            }
+                            actualIndex = virtualIndex;
+                        }
+                        else if (actualIndex >= tiles.Length)
+                        {
+                            tiles = EnsureTerrainArrayCapacity(selectedTerrain, tiles, expectedCount);
+                            if (actualIndex >= tiles.Length)
+                            {
+                                continue;
+                            }
+                            if (ConvertTrailingEmptyToNoEntry(tiles))
+                            {
+                                modified = true;
+                            }
+                        }
+
+                        if (!paintedIndicesThisDrag.Add(actualIndex))
+                        {
+                            continue;
+                        }
+
+                        if (IsEmptyTerrain(tiles[actualIndex]) && !isTailCell)
+                        {
+                            continue;
+                        }
+
+                        tiles[actualIndex] = selectedBrushTerrain;
+                        modified = true;
+                    }
+                }
+            }
+            if (modified)
+            {
+                selectedTerrain.m_Terrains = tiles;
+                MarkTerrainDirty(selectedTerrain);
+                SceneView.RepaintAll();
+            }
+        }
+
+        private static void FillIsland(Vector2Int clickedTile, int width, int height)
+        {
+            if (IsEmptyTerrain(selectedBrushTerrain) || selectedTerrain == null) return;
+
+            TerrainVirtualGrid grid = GetVirtualGrid(selectedTerrain);
+            if (grid == null) return;
+
+            string clickedTerrain = grid.GetTerrainId(clickedTile.x, clickedTile.y);
+            if (IsEmptyTerrain(clickedTerrain) || clickedTerrain == selectedBrushTerrain) return;
+
+            // Get contiguous region of the clicked terrain
+            var region = TerrainRegionCache.GetSameTerrainRegion(selectedTerrain, grid, clickedTile, width, height, useCache: false);
+            if (region.Count == 0) return;
+
+            // Register undo
+            if (selectedTerrain.Asset != null)
+            {
+                Undo.RegisterCompleteObjectUndo(selectedTerrain.Asset, "Fill Terrain Island");
+            }
+
+            // Fill all tiles in region
+            var tiles = selectedTerrain.m_Terrains;
+            foreach (var tile in region)
+            {
+                int actualIndex = grid.GetActualIndex(tile.x, tile.y);
+                if (actualIndex >= 0 && actualIndex < tiles.Length)
+                {
+                    tiles[actualIndex] = selectedBrushTerrain;
+                }
+            }
+
+            // Mark dirty and invalidate caches
+            MarkTerrainDirty(selectedTerrain);
+            SceneView.RepaintAll();
+        }
+
+        private static HashSet<Vector2Int> FindAdjacentIsland(Vector2Int centerTile, string targetTerrain, int width, int height)
+        {
+            HashSet<Vector2Int> island = new HashSet<Vector2Int>();
+            if (selectedTerrain == null || selectedTerrain.m_Terrains == null)
+                return island;
+
+            TerrainVirtualGrid grid = GetVirtualGrid(selectedTerrain);
+            if (grid == null)
+                return island;
+
+            if (IsEmptyTerrain(targetTerrain))
+                return island;
+
+            int halfSize = (brushSize - 1) / 2;
+            HashSet<Vector2Int> brushArea = new HashSet<Vector2Int>();
+
+            for (int dx = -halfSize; dx <= halfSize; dx++)
+            {
+                for (int dz = -halfSize; dz <= halfSize; dz++)
+                {
+                    int x = centerTile.x + dx;
+                    int z = centerTile.y + dz;
+                    if (x >= 0 && x < width && z >= 0 && z < height)
+                    {
+                        brushArea.Add(new Vector2Int(x, z));
+                    }
+                }
+            }
+
+            HashSet<Vector2Int> processedStarts = new HashSet<Vector2Int>();
+            foreach (var brushTile in brushArea)
+            {
+                foreach (var dir in Directions4)
+                {
+                    Vector2Int neighbor = brushTile + dir;
+                    if (brushArea.Contains(neighbor) ||
+                        neighbor.x < 0 || neighbor.x >= width ||
+                        neighbor.y < 0 || neighbor.y >= height)
+                    {
+                        continue;
+                    }
+
+                    if (!processedStarts.Add(neighbor))
+                    {
+                        continue;
+                    }
+
+                    string tid = grid.GetTerrainId(neighbor.x, neighbor.y);
+                    if (IsEmptyTerrain(tid) || tid != targetTerrain)
+                    {
+                        continue;
+                    }
+
+                    var neighborRegion = TerrainRegionCache.GetSameTerrainRegion(selectedTerrain, grid, neighbor, width, height, useCache: true);
+                    foreach (var pos in neighborRegion)
+                    {
+                        if (!brushArea.Contains(pos))
+                        {
+                            island.Add(pos);
+                        }
+                    }
+                }
+            }
+
+            return island;
+        }
+        
+        private static void DrawBrushPreview(Vector2Int centerTile, int width, int height, float startX, float startZ, TerrainHeightCache heightCache, TerrainHeightSettings heightSettings)
+        {
+            Event currentEvent = Event.current;
+            bool isSampling = IsSamplingModifier(currentEvent);
+            
+            if (isSampling)
+            {
+                // Draw sampling indicator - single tile showing the color that would be sampled
+                float worldX = startX + centerTile.x * TILE_SIZE;
+                float worldZ = startZ + centerTile.y * TILE_SIZE;
+
+                float tileHeight = ResolveTileHeight(heightCache, heightSettings, centerTile.x, centerTile.y);
+                FillTileQuad(s_TileVerticesOverlay, startX, startZ, centerTile.x, centerTile.y, heightCache, heightSettings, tileHeight, 0.05f);
+
+                // Get the actual terrain color at the hovered tile
+                // This should match EXACTLY how the tiles are displayed on the map (with brightness adjustment)
+                Color sampleColor = new Color(0.3f, 0.3f, 0.3f, 0.4f);
+                Color sampleOutline = new Color(0.2f, 0.2f, 0.2f, 0.8f);
+                if (selectedTerrain != null)
+                {
+                    TerrainVirtualGrid grid = GetVirtualGrid(selectedTerrain);
+                    if (grid != null)
+                    {
+                        int actualIndex = grid.GetActualIndex(centerTile.x, centerTile.y);
+                        if (actualIndex >= 0 && actualIndex < selectedTerrain.m_Terrains.Length)
+                        {
+                            string terrainToSample = selectedTerrain.m_Terrains[actualIndex];
+                            if (!IsEmptyTerrain(terrainToSample))
+                            {
+                                Color fillColor = GetTileFillColor(terrainToSample);
+                                sampleColor = new Color(fillColor.r, fillColor.g, fillColor.b, Mathf.Clamp01(fillColor.a + 0.1f));
+                                sampleOutline = GetBorderColor(terrainToSample);
+                            }
+                        }
+                    }
+                }
+                Handles.DrawSolidRectangleWithOutline(s_TileVerticesOverlay, sampleColor, sampleOutline);
+                
+                // Draw "Sample" text over the tile
+                Vector3 tileCenter = new Vector3(worldX + TILE_SIZE * 0.5f, tileHeight + 0.1f, worldZ + TILE_SIZE * 0.5f);
+                Vector2 guiPos = HandleUtility.WorldToGUIPoint(tileCenter);
+                
+                Handles.BeginGUI();
+                GUIStyle sampleStyle = new GUIStyle(EditorStyles.boldLabel);
+                sampleStyle.alignment = TextAnchor.MiddleCenter;
+                sampleStyle.normal.textColor = Color.white;
+                sampleStyle.fontSize = 12;
+                
+                // Draw text with black outline for visibility
+                Rect textRect = new Rect(guiPos.x - 30, guiPos.y - 10, 60, 20);
+                
+                // Draw outline
+                sampleStyle.normal.textColor = Color.black;
+                for (int dx = -1; dx <= 1; dx++)
+                {
+                    for (int dy = -1; dy <= 1; dy++)
+                    {
+                        if (dx != 0 || dy != 0)
+                        {
+                            GUI.Label(new Rect(textRect.x + dx, textRect.y + dy, textRect.width, textRect.height), "Sample", sampleStyle);
+                        }
+                    }
+                }
+                
+                // Draw main text
+                sampleStyle.normal.textColor = Color.white;
+                GUI.Label(textRect, "Sample", sampleStyle);
+                Handles.EndGUI();
+            }
+            else
+            {
+                // Paint preview with actual terrain color
+                if (IsEmptyTerrain(selectedBrushTerrain))
+                {
+                    // Fallback to yellow if no terrain selected
+                    Color previewColor = new Color(1f, 1f, 0f, 0.3f);
+                    DrawBrushTiles(centerTile, width, height, startX, startZ, heightCache, heightSettings, previewColor, Color.yellow);
+                }
+                else
+                {
+                    // Get the actual color of the terrain we're painting
+                    Color adjustedColor = GetTileFillColor(selectedBrushTerrain);
+
+                    // Make it semi-transparent for preview
+                    Color previewColor = new Color(adjustedColor.r, adjustedColor.g, adjustedColor.b, 0.4f);
+
+                    // Darken the adjusted color for the outline
+                    Color outlineColor = new Color(
+                        adjustedColor.r * 0.6f,
+                        adjustedColor.g * 0.6f,
+                        adjustedColor.b * 0.6f,
+                        0.8f
+                    );
+
+                    // Draw the preview tiles
+                    DrawBrushTiles(centerTile, width, height, startX, startZ, heightCache, heightSettings, previewColor, outlineColor);
+
+                    // Draw preview borders for the new terrain
+                    DrawPreviewBorders(centerTile, width, height, startX, startZ, heightCache, heightSettings, outlineColor);
+                }
+            }
+        }
+        
+        private static void DrawBrushTiles(Vector2Int centerTile, int width, int height, float startX, float startZ, TerrainHeightCache heightCache, TerrainHeightSettings heightSettings, Color fillColor, Color outlineColor)
+        {
+            int halfSize = (brushSize - 1) / 2;
+            TerrainVirtualGrid grid = GetVirtualGrid(selectedTerrain);
+            
+            for (int dx = -halfSize; dx <= halfSize; dx++)
+            {
+                for (int dz = -halfSize; dz <= halfSize; dz++)
+                {
+                    int tileX = centerTile.x + dx;
+                    int tileZ = centerTile.y + dz;
+                    
+                    if (tileX >= 0 && tileX < width && tileZ >= 0 && tileZ < height)
+                    {
+                        if (grid != null)
+                        {
+                            int virtualIndex = tileZ * width + tileX;
+                            int actualIndex = grid.GetActualIndex(tileX, tileZ);
+                            bool isTailCell = grid.IsTailIndex(virtualIndex);
+
+                            if (actualIndex < 0)
+                            {
+                                if (!isTailCell)
+                                {
+                                    continue;
+                                }
+                            }
+                            else
+                            {
+                                int terrainLength = selectedTerrain.m_Terrains?.Length ?? 0;
+                                if (actualIndex >= terrainLength)
+                                {
+                                    if (!isTailCell)
+                                    {
+                                        continue;
+                                    }
+                                }
+                                else
+                                {
+                                    string tid = selectedTerrain.m_Terrains[actualIndex];
+                                    if (IsEmptyTerrain(tid) && !isTailCell)
+                                    {
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+
+                        float tileHeight = ResolveTileHeight(heightCache, heightSettings, tileX, tileZ);
+                        FillTileQuad(s_TileVerticesOverlay, startX, startZ, tileX, tileZ, heightCache, heightSettings, tileHeight, 0.05f);
+
+                        Handles.DrawSolidRectangleWithOutline(s_TileVerticesOverlay, fillColor, outlineColor);
+                    }
+                }
+            }
+        }
+        
+        private static void DrawPreviewBorders(Vector2Int centerTile, int width, int height, float startX, float startZ, TerrainHeightCache heightCache, TerrainHeightSettings heightSettings, Color borderColor)
+        {
+            // Collect all tiles that would be painted
+            HashSet<Vector2Int> paintedTiles = new HashSet<Vector2Int>();
+            int halfSize = (brushSize - 1) / 2;
+            TerrainVirtualGrid grid = GetVirtualGrid(selectedTerrain);
+            
+            for (int dx = -halfSize; dx <= halfSize; dx++)
+            {
+                for (int dz = -halfSize; dz <= halfSize; dz++)
+                {
+                    int tileX = centerTile.x + dx;
+                    int tileZ = centerTile.y + dz;
+
+                    if (tileX >= 0 && tileX < width && tileZ >= 0 && tileZ < height)
+                    {
+                        if (grid != null)
+                        {
+                            int virtualIndex = tileZ * width + tileX;
+                            int actualIndex = grid.GetActualIndex(tileX, tileZ);
+                            bool isTailCell = grid.IsTailIndex(virtualIndex);
+
+                            if (actualIndex < 0)
+                            {
+                                if (!isTailCell)
+                                {
+                                    continue;
+                                }
+                            }
+                            else
+                            {
+                                int terrainLength = selectedTerrain.m_Terrains?.Length ?? 0;
+                                if (actualIndex >= terrainLength)
+                                {
+                                    if (!isTailCell)
+                                    {
+                                        continue;
+                                    }
+                                }
+                                else
+                                {
+                                    string tid = selectedTerrain.m_Terrains[actualIndex];
+                                    if (IsEmptyTerrain(tid) && !isTailCell)
+                                    {
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+
+                        paintedTiles.Add(new Vector2Int(tileX, tileZ));
+                    }
+                }
+            }
+            
+            // Draw borders around the painted area
+            Handles.color = borderColor;
+            float borderThickness = 3f;
+            
+            foreach (var tile in paintedTiles)
+            {
+                float tileX = startX + tile.x * TILE_SIZE;
+                float tileZ = startZ + tile.y * TILE_SIZE;
+
+                // Check each edge to see if it's a border
+                // Use tile center height for flat border edges
+                float tileHeight = ResolveTileHeight(heightCache, heightSettings, tile.x, tile.y) + 0.06f;
+
+                // Top edge
+                if (!paintedTiles.Contains(new Vector2Int(tile.x, tile.y + 1)))
+                {
+                    Vector3 lineStart = new Vector3(tileX, tileHeight, tileZ + TILE_SIZE);
+                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, tileHeight, tileZ + TILE_SIZE);
+                    Handles.DrawLine(lineStart, lineEnd, borderThickness);
+                }
+
+                // Right edge
+                if (!paintedTiles.Contains(new Vector2Int(tile.x + 1, tile.y)))
+                {
+                    Vector3 lineStart = new Vector3(tileX + TILE_SIZE, tileHeight, tileZ);
+                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, tileHeight, tileZ + TILE_SIZE);
+                    Handles.DrawLine(lineStart, lineEnd, borderThickness);
+                }
+
+                // Bottom edge
+                if (!paintedTiles.Contains(new Vector2Int(tile.x, tile.y - 1)))
+                {
+                    Vector3 lineStart = new Vector3(tileX, tileHeight, tileZ);
+                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, tileHeight, tileZ);
+                    Handles.DrawLine(lineStart, lineEnd, borderThickness);
+                }
+
+                // Left edge
+                if (!paintedTiles.Contains(new Vector2Int(tile.x - 1, tile.y)))
+                {
+                    Vector3 lineStart = new Vector3(tileX, tileHeight, tileZ);
+                    Vector3 lineEnd = new Vector3(tileX, tileHeight, tileZ + TILE_SIZE);
+                    Handles.DrawLine(lineStart, lineEnd, borderThickness);
+                }
+            }
+        }
+        
+        private static void PickTerrain(Vector2Int tile, int width)
+        {
+            if (selectedTerrain == null)
+                return;
+            
+            TerrainVirtualGrid grid = GetVirtualGrid(selectedTerrain);
+            if (grid == null)
+                return;
+
+            int actualIndex = grid.GetActualIndex(tile.x, tile.y);
+            if (actualIndex >= 0 && actualIndex < selectedTerrain.m_Terrains.Length)
+            {
+                string sampledTid = selectedTerrain.m_Terrains[actualIndex];
+                if (!IsEmptyTerrain(sampledTid))
+                {
+                    selectedBrushTerrain = sampledTid;
+
+                    // Force UI refresh to show the newly selected terrain
+                    if (instance != null)
+                    {
+                        instance.Repaint();
+                    }
+                }
+            }
+        }
+        
+        
+        private static HashSet<Vector2Int> FindConnectedRegion(TerrainAssetAdapter terrain, Vector2Int startTile, int width, int height)
+        {
+            TerrainVirtualGrid grid = GetVirtualGrid(terrain);
+            if (grid == null)
+            {
+                return new HashSet<Vector2Int>();
+            }
+
+            return TerrainRegionCache.GetSameTerrainRegion(terrain, grid, startTile, width, height, useCache: false);
+        }
+        
+        private static void DrawRegionHighlight(HashSet<Vector2Int> region, float startX, float startZ, TerrainHeightCache heightCache, TerrainHeightSettings heightSettings, string terrainId)
+        {
+            if (region.Count == 0) return;
+
+            // Only draw borders - no tile overlay to reduce visual noise
+            // Build list of border edges with their owning tile (for flat tile height)
+            // Each edge is: (tile, edge start vertex offset, edge end vertex offset)
+            List<(Vector2Int tile, Vector2Int startOffset, Vector2Int endOffset)> edges = new List<(Vector2Int, Vector2Int, Vector2Int)>();
+
+            foreach (var tile in region)
+            {
+                // Top edge
+                if (!region.Contains(tile + new Vector2Int(0, 1)))
+                {
+                    edges.Add((tile, new Vector2Int(0, 1), new Vector2Int(1, 1)));
+                }
+                // Right edge
+                if (!region.Contains(tile + new Vector2Int(1, 0)))
+                {
+                    edges.Add((tile, new Vector2Int(1, 0), new Vector2Int(1, 1)));
+                }
+                // Bottom edge
+                if (!region.Contains(tile + new Vector2Int(0, -1)))
+                {
+                    edges.Add((tile, new Vector2Int(0, 0), new Vector2Int(1, 0)));
+                }
+                // Left edge
+                if (!region.Contains(tile + new Vector2Int(-1, 0)))
+                {
+                    edges.Add((tile, new Vector2Int(0, 0), new Vector2Int(0, 1)));
+                }
+            }
+
+            // Calculate colors based on terrain brightness for contrast
+            Color baseColor = GetBaseTerrainColor(terrainId);
+            float brightnessCheck = baseColor.r * 0.299f + baseColor.g * 0.587f + baseColor.b * 0.114f;
+            bool isDarkTerrain = brightnessCheck < 0.4f;
+
+            // Draw multi-pass border with soft blur effect
+            // Contrasting base color (black for light terrains, white for dark terrains)
+            Color outlineColor = isDarkTerrain ?
+                new Color(1f, 1f, 1f, 1f) :  // White for dark terrains
+                new Color(0f, 0f, 0f, 1f);    // Black for light terrains
+
+            // Calculate the main border color
+            float boost = isDarkTerrain ? 1.5f : 1.2f;
+            Color borderColor = new Color(
+                Mathf.Min(1f, baseColor.r * boost),
+                Mathf.Min(1f, baseColor.g * boost),
+                Mathf.Min(1f, baseColor.b * boost),
+                1f
+            );
+
+            // Draw multiple passes to create soft blur effect
+            // Outer glow (widest, most transparent)
+            Color glowColor = Color.Lerp(outlineColor, borderColor, 0.3f);
+            glowColor.a = 0.2f;
+            Handles.color = glowColor;
+            foreach (var edge in edges)
+            {
+                float tileHeight = ResolveTileHeight(heightCache, heightSettings, edge.tile.x, edge.tile.y) + 0.028f;
+                Vector3 start = new Vector3(startX + (edge.tile.x + edge.startOffset.x) * TILE_SIZE, tileHeight, startZ + (edge.tile.y + edge.startOffset.y) * TILE_SIZE);
+                Vector3 end = new Vector3(startX + (edge.tile.x + edge.endOffset.x) * TILE_SIZE, tileHeight, startZ + (edge.tile.y + edge.endOffset.y) * TILE_SIZE);
+                Handles.DrawLine(start, end, 4f);
+            }
+
+            // Middle layer (medium width, medium opacity)
+            Color midColor = Color.Lerp(outlineColor, borderColor, 0.5f);
+            midColor.a = 0.4f;
+            Handles.color = midColor;
+            foreach (var edge in edges)
+            {
+                float tileHeight = ResolveTileHeight(heightCache, heightSettings, edge.tile.x, edge.tile.y) + 0.031f;
+                Vector3 start = new Vector3(startX + (edge.tile.x + edge.startOffset.x) * TILE_SIZE, tileHeight, startZ + (edge.tile.y + edge.startOffset.y) * TILE_SIZE);
+                Vector3 end = new Vector3(startX + (edge.tile.x + edge.endOffset.x) * TILE_SIZE, tileHeight, startZ + (edge.tile.y + edge.endOffset.y) * TILE_SIZE);
+                Handles.DrawLine(start, end, 3f);
+            }
+
+            // Core border (thinnest, most opaque)
+            Color coreColor = borderColor;
+            coreColor.a = 0.8f;
+            Handles.color = coreColor;
+            foreach (var edge in edges)
+            {
+                float tileHeight = ResolveTileHeight(heightCache, heightSettings, edge.tile.x, edge.tile.y) + 0.034f;
+                Vector3 start = new Vector3(startX + (edge.tile.x + edge.startOffset.x) * TILE_SIZE, tileHeight, startZ + (edge.tile.y + edge.startOffset.y) * TILE_SIZE);
+                Vector3 end = new Vector3(startX + (edge.tile.x + edge.endOffset.x) * TILE_SIZE, tileHeight, startZ + (edge.tile.y + edge.endOffset.y) * TILE_SIZE);
+                Handles.DrawLine(start, end, 2f);
+            }
+        }
+        
+        private static void DrawLabelWithColoredIcon(Vector3 position, string text, string terrainId, GUIStyle textStyle, Color textColor, float extraAlpha = 1f)
+        {
+            // Convert world position to GUI position
+            Vector2 guiPos = HandleUtility.WorldToGUIPoint(position);
+            
+            // Calculate text dimensions
+            s_LabelContent.text = text;
+            Vector2 textSize = textStyle.CalcSize(s_LabelContent);
+            
+            // Add padding for the colored icon
+            float iconSize = 8f;
+            float iconPadding = 3f;
+            float totalWidth = textSize.x + iconSize + iconPadding * 2;
+            
+            // Position for the whole label (centered)
+            Rect labelRect = new Rect(guiPos.x - totalWidth / 2, guiPos.y - textSize.y / 2, totalWidth, textSize.y);
+
+            // Clamp into view and compute an anchor-based edge fade (so labels fade out as anchor leaves)
+            float alphaMul = 1f;
+            var sv = SceneView.currentDrawingSceneView;
+            if (sv != null)
+            {
+                float viewW = sv.position.width;
+                float viewH = sv.position.height;
+                float pad = 8f;
+                // Distance of anchor from viewport (0 if inside)
+                float dx = (guiPos.x < 0) ? -guiPos.x : (guiPos.x > viewW ? guiPos.x - viewW : 0f);
+                float dy = (guiPos.y < 0) ? -guiPos.y : (guiPos.y > viewH ? guiPos.y - viewH : 0f);
+                float d = Mathf.Max(dx, dy);
+                float band = 24f;
+                alphaMul = Mathf.Clamp01(1f - d / band);
+                // Clamp label rect to stay readable while fading
+                labelRect.x = Mathf.Clamp(labelRect.x, pad, viewW - labelRect.width - pad);
+                labelRect.y = Mathf.Clamp(labelRect.y, pad, viewH - labelRect.height - pad);
+                // If fully outside beyond band, skip
+                if (alphaMul <= 0.001f) return;
+            }
+            
+            // Always draw an outline for better readability
+            // Draw multiple outline passes for stronger effect
+            GUIStyle outlineStyle = new GUIStyle(textStyle);
+            Color outlineColor = (textColor == Color.black) ? Color.white : Color.black;
+            outlineStyle.normal.textColor = new Color(outlineColor.r, outlineColor.g, outlineColor.b, 0.8f * alphaMul * extraAlpha);
+            
+            // Draw outline in 8 directions for better coverage
+            Vector2[] outlineOffsets = new Vector2[]
+            {
+                new Vector2(-1, -1), new Vector2(0, -1), new Vector2(1, -1),
+                new Vector2(-1, 0),                      new Vector2(1, 0),
+                new Vector2(-1, 1),  new Vector2(0, 1),  new Vector2(1, 1)
+            };
+            
+            foreach (var offset in outlineOffsets)
+            {
+                Rect outlineTextRect = new Rect(
+                    labelRect.x + iconSize + iconPadding * 2 + offset.x, 
+                    labelRect.y + offset.y, 
+                    textSize.x, 
+                    labelRect.height
+                );
+                GUI.Label(outlineTextRect, s_LabelContent, outlineStyle);
+                
+                // Draw outline for icon too
+                Rect outlineIconRect = new Rect(
+                    labelRect.x + iconPadding + offset.x, 
+                    labelRect.y + (labelRect.height - iconSize) / 2 + offset.y, 
+                    iconSize, 
+                    iconSize
+                );
+                EditorGUI.DrawRect(outlineIconRect, new Color(outlineColor.r, outlineColor.g, outlineColor.b, 0.3f));
+            }
+            
+            // Draw colored icon
+            Color terrainColor = GetBaseTerrainColor(terrainId);
+            Rect iconRect = new Rect(labelRect.x + iconPadding, 
+                labelRect.y + (labelRect.height - iconSize) / 2, iconSize, iconSize);
+            
+            // Draw icon background
+            Color iconFill = terrainColor; iconFill.a *= (alphaMul * extraAlpha);
+            EditorGUI.DrawRect(iconRect, iconFill);
+            
+            // Draw icon border for clarity
+            Color borderColorOutline = (textColor == Color.black) ? Color.black : Color.white;
+            borderColorOutline.a *= (alphaMul * extraAlpha);
+            Handles.DrawBezier(
+                new Vector3(iconRect.x, iconRect.y, 0),
+                new Vector3(iconRect.x + iconSize, iconRect.y, 0),
+                new Vector3(iconRect.x, iconRect.y, 0),
+                new Vector3(iconRect.x + iconSize, iconRect.y, 0),
+                borderColorOutline, null, 1f
+            );
+            
+            // Draw the text on top
+            textStyle.normal.textColor = new Color(textColor.r, textColor.g, textColor.b, textColor.a * alphaMul * extraAlpha);
+            Rect textRect = new Rect(labelRect.x + iconSize + iconPadding * 2, labelRect.y, 
+                textSize.x, labelRect.height);
+            GUI.Label(textRect, s_LabelContent, textStyle);
+        }
+
+        // Draw label at an explicit GUI position, but compute edge-fade from the anchor world position
+        private static void DrawLabelWithColoredIconAtGui(Vector3 anchorWorld, Vector2 guiPos, string text, string terrainId, GUIStyle textStyle, Color textColor, float extraAlpha = 1f)
+        {
+            // Compute anchor GUI for edge fade
+            Vector2 anchorGui = HandleUtility.WorldToGUIPoint(anchorWorld);
+
+            // Calculate text dimensions
+            s_LabelContent.text = text;
+            Vector2 textSize = textStyle.CalcSize(s_LabelContent);
+
+            float iconSize = 8f;
+            float iconPadding = 3f;
+            float totalWidth = textSize.x + iconSize + iconPadding * 2f;
+
+            // Position rect around provided GUI position
+            Rect labelRect = new Rect(guiPos.x - totalWidth / 2f, guiPos.y - textSize.y / 2f, totalWidth, textSize.y);
+
+            // Edge fade computed from anchor position, clamp rect into view to stay readable while fading
+            float alphaMul = 1f;
+            var sv = SceneView.currentDrawingSceneView;
+            if (sv != null)
+            {
+                float viewW = sv.position.width;
+                float viewH = sv.position.height;
+                float pad = 8f;
+                float dx = (anchorGui.x < 0) ? -anchorGui.x : (anchorGui.x > viewW ? anchorGui.x - viewW : 0f);
+                float dy = (anchorGui.y < 0) ? -anchorGui.y : (anchorGui.y > viewH ? anchorGui.y - viewH : 0f);
+                float d = Mathf.Max(dx, dy);
+                float band = 24f;
+                alphaMul = Mathf.Clamp01(1f - d / band);
+                // Clamp visual rect
+                labelRect.x = Mathf.Clamp(labelRect.x, pad, viewW - labelRect.width - pad);
+                labelRect.y = Mathf.Clamp(labelRect.y, pad, viewH - labelRect.height - pad);
+                if (alphaMul <= 0.001f) return;
+            }
+
+            // Outline
+            GUIStyle outlineStyle = new GUIStyle(textStyle);
+            Color outlineColor = (textColor == Color.black) ? Color.white : Color.black;
+            outlineStyle.normal.textColor = new Color(outlineColor.r, outlineColor.g, outlineColor.b, 0.8f * alphaMul * extraAlpha);
+            Vector2[] outlineOffsets = new Vector2[]
+            {
+                new Vector2(-1, -1), new Vector2(0, -1), new Vector2(1, -1),
+                new Vector2(-1, 0),                      new Vector2(1, 0),
+                new Vector2(-1, 1),  new Vector2(0, 1),  new Vector2(1, 1)
+            };
+            foreach (var offset in outlineOffsets)
+            {
+                Rect outlineTextRect = new Rect(labelRect.x + iconSize + iconPadding * 2 + offset.x,
+                                                labelRect.y + offset.y,
+                                                textSize.x,
+                                                labelRect.height);
+                GUI.Label(outlineTextRect, s_LabelContent, outlineStyle);
+
+                Rect outlineIconRect = new Rect(labelRect.x + iconPadding + offset.x,
+                    labelRect.y + (labelRect.height - iconSize) / 2 + offset.y,
+                    iconSize, iconSize);
+                EditorGUI.DrawRect(outlineIconRect, new Color(outlineColor.r, outlineColor.g, outlineColor.b, 0.3f));
+            }
+
+            // Icon
+            Color terrainColor = GetBaseTerrainColor(terrainId);
+            Rect iconRect = new Rect(labelRect.x + iconPadding,
+                                     labelRect.y + (labelRect.height - iconSize) / 2,
+                                     iconSize, iconSize);
+
+            Color fill = terrainColor; fill.a *= (alphaMul * extraAlpha);
+            EditorGUI.DrawRect(iconRect, fill);
+            Color borderColor = (textColor == Color.black) ? Color.black : Color.white;
+            borderColor.a *= (alphaMul * extraAlpha);
+            Handles.DrawBezier(new Vector3(iconRect.x, iconRect.y, 0),
+                               new Vector3(iconRect.x + iconSize, iconRect.y, 0),
+                               new Vector3(iconRect.x, iconRect.y, 0),
+                               new Vector3(iconRect.x + iconSize, iconRect.y, 0),
+                               borderColor, null, 1f);
+
+            // Text
+            textStyle.normal.textColor = new Color(textColor.r, textColor.g, textColor.b, textColor.a * alphaMul * extraAlpha);
+            Rect textRect = new Rect(labelRect.x + iconSize + iconPadding * 2, labelRect.y, textSize.x, labelRect.height);
+            GUI.Label(textRect, s_LabelContent, textStyle);
+        }
+        
+        private static void DrawIslandBorders(TerrainIsland island, int mapWidth, int mapHeight, float startX, float startZ, TerrainHeightCache heightCache, TerrainHeightSettings heightSettings, Color borderColor)
+        {
+            Handles.color = borderColor;
+            float borderThickness = 3f;
+            var islandTiles = island.TileSet;
+
+            // Check each tile in the island for border edges
+            foreach (var tile in island.tiles)
+            {
+                float tileX = startX + tile.x * TILE_SIZE;
+                float tileZ = startZ + tile.y * TILE_SIZE;
+                // Use tile center height for flat border edges
+                float tileHeight = ResolveTileHeight(heightCache, heightSettings, tile.x, tile.y) + 0.02f;
+
+                // Check all 4 edges
+                // Top edge (z+)
+                if (tile.y >= mapHeight - 1 || !islandTiles.Contains(new Vector2Int(tile.x, tile.y + 1)))
+                {
+                    Vector3 lineStart = new Vector3(tileX, tileHeight, tileZ + TILE_SIZE);
+                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, tileHeight, tileZ + TILE_SIZE);
+                    Handles.DrawLine(lineStart, lineEnd, borderThickness);
+                }
+
+                // Right edge (x+)
+                if (tile.x >= mapWidth - 1 || !islandTiles.Contains(new Vector2Int(tile.x + 1, tile.y)))
+                {
+                    Vector3 lineStart = new Vector3(tileX + TILE_SIZE, tileHeight, tileZ);
+                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, tileHeight, tileZ + TILE_SIZE);
+                    Handles.DrawLine(lineStart, lineEnd, borderThickness);
+                }
+
+                // Bottom edge (z-)
+                if (tile.y <= 0 || !islandTiles.Contains(new Vector2Int(tile.x, tile.y - 1)))
+                {
+                    Vector3 lineStart = new Vector3(tileX, tileHeight, tileZ);
+                    Vector3 lineEnd = new Vector3(tileX + TILE_SIZE, tileHeight, tileZ);
+                    Handles.DrawLine(lineStart, lineEnd, borderThickness);
+                }
+
+                // Left edge (x-)
+                if (tile.x <= 0 || !islandTiles.Contains(new Vector2Int(tile.x - 1, tile.y)))
+                {
+                    Vector3 lineStart = new Vector3(tileX, tileHeight, tileZ);
+                    Vector3 lineEnd = new Vector3(tileX, tileHeight, tileZ + TILE_SIZE);
+                    Handles.DrawLine(lineStart, lineEnd, borderThickness);
+                }
+            }
+        }
+        
+        /// <summary>
+        /// Gets the cached islands for a terrain. Used by minimap for island grid overlay.
+        /// </summary>
+        internal static List<TerrainIsland> GetIslandsForTerrain(TerrainAssetAdapter terrain)
+        {
+            if (terrain == null) return null;
+            return GetOrCreateIslands(terrain, 100f); // Default distance for minimap
+        }
+
+        private static List<TerrainIsland> GetOrCreateIslands(TerrainAssetAdapter terrain, float cameraDistance)
+        {
+            // Check if terrain changed or we need to rebuild
+            if (terrain != lastCachedTerrain || !islandCache.ContainsKey(terrain))
+            {
+                // Terrain changed, rebuild islands
+                islandCache[terrain] = FindTerrainIslands(terrain, cameraDistance);
+                lastCachedTerrain = terrain;
+                lastIslandCameraDistance = cameraDistance;
+            }
+            else
+            {
+                var islands = islandCache[terrain];
+                
+                // Only recalculate positions when camera has stopped moving
+                if (!cameraIsMoving)
+                {
+                    // Check if we need to update based on significant distance change
+                    float distanceChange = Mathf.Abs(cameraDistance - lastIslandCameraDistance);
+                    if (distanceChange > 5f) // Only update if zoom changed significantly
+                    {
+                        foreach (var island in islands)
+                        {
+                            island.CalculateLabelPositions(cameraDistance);
+                        }
+                        lastIslandCameraDistance = cameraDistance;
+                    }
+                }
+            }
+            
+            return islandCache[terrain];
+        }
+        
+        private static List<TerrainIsland> FindTerrainIslands(TerrainAssetAdapter terrain, float cameraDistance)
+        {
+            if (terrain == null || terrain.m_Terrains == null)
+                return new List<TerrainIsland>();
+            
+            int width = terrain.m_Width;
+            int height = terrain.m_Height;
+            bool[,] visited = new bool[width, height];
+            List<TerrainIsland> islands = new List<TerrainIsland>();
+
+            TerrainVirtualGrid grid = GetVirtualGrid(terrain);
+            if (grid == null)
+            {
+                return islands;
+            }
+            
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    if (!visited[x, y])
+                    {
+                        string terrainId = grid.GetTerrainId(x, y);
+                        if (IsEmptyTerrain(terrainId))
+                        {
+                            visited[x, y] = true;
+                            continue;
+                        }
+                        
+                        // Start flood fill for this island
+                        TerrainIsland island = new TerrainIsland(terrainId);
+                        Queue<Vector2Int> queue = new Queue<Vector2Int>();
+                        queue.Enqueue(new Vector2Int(x, y));
+                        visited[x, y] = true;
+                        
+                        while (queue.Count > 0)
+                        {
+                            Vector2Int current = queue.Dequeue();
+                            island.AddTile(current);
+                            
+                            // Check 4 neighbors
+                            foreach (var dir in Directions4)
+                            {
+                                int nx = current.x + dir.x;
+                                int ny = current.y + dir.y;
+                                
+                                // Check bounds
+                                if (nx >= 0 && nx < width && ny >= 0 && ny < height && !visited[nx, ny])
+                                {
+                                    string neighborTerrain = grid.GetTerrainId(nx, ny);
+
+                                    // If same terrain type, add to queue
+                                    if (!IsEmptyTerrain(neighborTerrain) && neighborTerrain == terrainId)
+                                    {
+                                        visited[nx, ny] = true;
+                                        queue.Enqueue(new Vector2Int(nx, ny));
+                                    }
+                                }
+                            }
+                        }
+                        
+                        island.CalculateLabelPositions(cameraDistance);
+                        islands.Add(island);
+                    }
+                }
+            }
+            
+            return islands;
+        }
+        
+        private static string GetTerrainDisplayText(string terrainId)
+        {
+            if (IsEmptyTerrain(terrainId))
+            {
+                return string.Empty;
+            }
+
+            string tid = GetTidLabel(terrainId);
+            string localizedName = ResolveTerrainNameForCurrentLanguage(terrainId);
+            
+            switch (textDisplayMode)
+            {
+                case TextDisplayMode.ShowTID:
+                    return tid;
+                    
+                case TextDisplayMode.ShowName:
+                    return string.IsNullOrEmpty(localizedName) ? tid : localizedName;
+                    
+                case TextDisplayMode.ShowBoth:
+                    if (string.IsNullOrEmpty(localizedName) || string.Equals(localizedName, tid, StringComparison.Ordinal))
+                    {
+                        return tid;
+                    }
+                    return tid + "\n" + localizedName;
+                    
+                default:
+                    return tid;
+            }
+        }
+
+        private static string ResolveTerrainNameForCurrentLanguage(string terrainId)
+        {
+            string databaseName = TerrainDefinitions.GetTerrainName(terrainId);
+            if (!string.IsNullOrEmpty(databaseName))
+            {
+                return databaseName.StartsWith("MTID_", StringComparison.OrdinalIgnoreCase)
+                    ? databaseName.Substring(5)
+                    : databaseName;
+            }
+
+            return GetTidLabel(terrainId);
+        }
+
+        private static string GetTidLabel(string terrainId)
+        {
+            if (string.IsNullOrEmpty(terrainId))
+            {
+                return string.Empty;
+            }
+
+            return terrainId;
+        }
+
+        private static void ExtractTerrainData()
+        {
+            if (!File.Exists(MapToolsPaths.TerrainXmlBundlePath))
+            {
+                EditorUtility.DisplayDialog(
+                    "Terrain Data",
+                    $"Bundle not found at:\n{MapToolsPaths.TerrainXmlBundlePath}\n\nConfigure your game data path in Project Settings → Divine Dragon.",
+                    "OK");
+                return;
+            }
+
+            try
+            {
+                // 1. Extract Terrain.xml
+                EditorUtility.DisplayProgressBar("Terrain Paint Tool", "Extracting Terrain.xml...", 0.2f);
+                bool terrainSuccess = Dumper.ExtractAssetAtPath(MapToolsPaths.TerrainXmlBundlePath);
+
+                if (!terrainSuccess)
+                {
+                    EditorUtility.ClearProgressBar();
+                    EditorUtility.DisplayDialog("Terrain Data", "Terrain.xml extraction failed. Check console for details.", "OK");
+                    return;
+                }
+
+                // 2. Extract and dump GameData.bytes for English
+                EditorUtility.DisplayProgressBar("Terrain Paint Tool", "Extracting English localization...", 0.4f);
+                ExtractGameDataForLanguage(MsbtPaths.EnglishMessageBundlePath, MsbtPaths.EnglishExtractedPath, MsbtPaths.EnglishDumpedPath);
+
+                // 3. Extract and dump GameData.bytes for Japanese
+                EditorUtility.DisplayProgressBar("Terrain Paint Tool", "Extracting Japanese localization...", 0.6f);
+                ExtractGameDataForLanguage(MsbtPaths.JapaneseMessageBundlePath, MsbtPaths.JapaneseExtractedPath, MsbtPaths.JapaneseDumpedPath);
+
+                EditorUtility.ClearProgressBar();
+
+                // 4. Refresh and invalidate caches
+                AssetDatabase.Refresh();
+                TerrainDefinitions.InvalidateCache();
+                TerrainLocalizer.InvalidateCache();
+
+                EditorUtility.DisplayDialog(
+                    "Terrain Data",
+                    $"Terrain data extracted successfully:\n• Terrain.xml\n• English localization\n• Japanese localization",
+                    "OK");
+            }
+            catch (Exception ex)
+            {
+                EditorUtility.ClearProgressBar();
+                Debug.LogError($"[TerrainPaintTool] Failed to extract terrain data: {ex}");
+                EditorUtility.DisplayDialog("Terrain Data", $"Extraction error:\n{ex.Message}", "OK");
+            }
+        }
+
+        private static void ExtractGameDataForLanguage(string bundleFolderPath, string extractedPath, string dumpedPath)
+        {
+            string gameDataBundle = Path.Combine(bundleFolderPath, "GameData.bytes.bundle");
+
+            if (!File.Exists(gameDataBundle))
+            {
+                Debug.LogWarning($"[TerrainPaintTool] GameData bundle not found at: {gameDataBundle}");
+                return;
+            }
+
+            // Extract the bundle
+            bool extractSuccess = Dumper.ExtractAssetAtPath(gameDataBundle);
+            if (!extractSuccess)
+            {
+                Debug.LogWarning($"[TerrainPaintTool] Failed to extract GameData bundle: {gameDataBundle}");
+                return;
+            }
+
+            // Dump to .txt
+            string bytesPath = Path.Combine(extractedPath, "GameData.bytes");
+            if (File.Exists(bytesPath))
+            {
+                try
+                {
+                    Directory.CreateDirectory(dumpedPath);
+                    MessageBundle bundle = MessageBundle.Load(bytesPath);
+                    string script = bundle.ToAstraScript();
+                    File.WriteAllText(Path.Combine(dumpedPath, "GameData.txt"), script);
+                    Debug.Log($"[TerrainPaintTool] Dumped GameData.txt to: {dumpedPath}");
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning($"[TerrainPaintTool] Failed to dump GameData: {ex.Message}");
+                }
+            }
+            else
+            {
+                Debug.LogWarning($"[TerrainPaintTool] Extracted bytes file not found at: {bytesPath}");
+            }
+        }
+        
+        private static void DrawResizePreview(int currentWidth, int currentHeight, float startX, float startZ, TerrainHeightCache heightCache, TerrainHeightSettings heightSettings)
+        {
+            if (selectedTerrain == null) return;
+            
+            int widthChange = newTerrainWidth - currentWidth;
+            int heightChange = newTerrainHeight - currentHeight;
+            
+            // Show preview for both expansion and shrinking
+            if (widthChange == 0 && heightChange == 0) return;
+            
+            // Draw expansion areas in green
+            if (widthChange > 0)
+            {
+                Color expandColor = new Color(0f, 1f, 0f, 0.3f);
+                // Expand to the right only
+                for (int row = 0; row < currentHeight; row++)
+                {
+                    for (int col = currentWidth; col < newTerrainWidth; col++)
+                    {
+                        float tileX = startX + col * TILE_SIZE;
+                        float tileZ = startZ + row * TILE_SIZE;
+                        int sampleCol = Mathf.Clamp(col, 0, Mathf.Max(currentWidth - 1, 0));
+                        int sampleRow = Mathf.Clamp(row, 0, Mathf.Max(currentHeight - 1, 0));
+                        float tileHeight = ResolveTileHeight(heightCache, heightSettings, sampleCol, sampleRow);
+                        FillTileQuad(s_TileVerticesOverlay, startX, startZ, col, row, heightCache, heightSettings, tileHeight, 0.05f);
+                        Handles.DrawSolidRectangleWithOutline(s_TileVerticesOverlay, expandColor, Color.green);
+                    }
+                }
+            }
+            
+            if (heightChange > 0)
+            {
+                Color expandColor = new Color(0f, 1f, 0f, 0.3f);
+                // Expand to the bottom only
+                for (int row = currentHeight; row < newTerrainHeight; row++)
+                {
+                    for (int col = 0; col < newTerrainWidth; col++)
+                    {
+                        // Don't double-draw the corner if both width and height are expanding
+                        if (widthChange > 0 && col >= currentWidth) continue;
+                        
+                        float tileX = startX + col * TILE_SIZE;
+                        float tileZ = startZ + row * TILE_SIZE;
+                        int sampleCol = Mathf.Clamp(col, 0, Mathf.Max(currentWidth - 1, 0));
+                        int sampleRow = Mathf.Clamp(row, 0, Mathf.Max(currentHeight - 1, 0));
+                        float tileHeight = ResolveTileHeight(heightCache, heightSettings, sampleCol, sampleRow);
+                        FillTileQuad(s_TileVerticesOverlay, startX, startZ, col, row, heightCache, heightSettings, tileHeight, 0.05f);
+                        Handles.DrawSolidRectangleWithOutline(s_TileVerticesOverlay, expandColor, Color.green);
+                    }
+                }
+            }
+            
+            // Continue with shrinking preview
+            if (widthChange >= 0 && heightChange >= 0) return;
+            
+            // Calculate which tiles will be removed
+            int removeLeft = 0, removeRight = 0, removeTop = 0, removeBottom = 0;
+            
+            if (widthChange < 0) // Shrinking width
+            {
+                int totalRemove = -widthChange;
+                switch (shrinkHorizontal)
+                {
+                    case ShrinkDirection.Left:
+                        removeLeft = totalRemove;
+                        break;
+                    case ShrinkDirection.Right:
+                        removeRight = totalRemove;
+                        break;
+                    case ShrinkDirection.Center:
+                        removeLeft = totalRemove / 2;
+                        removeRight = totalRemove - removeLeft;
+                        break;
+                }
+            }
+            
+            if (heightChange < 0) // Shrinking height
+            {
+                int totalRemove = -heightChange;
+                switch (shrinkVertical)
+                {
+                    case ShrinkDirectionVertical.Top:
+                        removeTop = totalRemove;
+                        break;
+                    case ShrinkDirectionVertical.Bottom:
+                        removeBottom = totalRemove;
+                        break;
+                    case ShrinkDirectionVertical.Center:
+                        removeBottom = totalRemove / 2;
+                        removeTop = totalRemove - removeBottom;
+                        break;
+                }
+            }
+            
+            // Draw red overlay on tiles that will be removed
+            Color removeColor = new Color(1f, 0f, 0f, 0.3f);
+            Color removeBorder = new Color(1f, 0f, 0f, 0.8f);
+            
+            // Draw left removal area
+            if (removeLeft > 0)
+            {
+                for (int row = 0; row < currentHeight; row++)
+                {
+                    for (int col = 0; col < removeLeft; col++)
+                    {
+                        DrawRemovalTile(col, row, startX, startZ, heightCache, heightSettings, removeColor);
+                    }
+                }
+            }
+            
+            // Draw right removal area
+            if (removeRight > 0)
+            {
+                for (int row = 0; row < currentHeight; row++)
+                {
+                    for (int col = currentWidth - removeRight; col < currentWidth; col++)
+                    {
+                        DrawRemovalTile(col, row, startX, startZ, heightCache, heightSettings, removeColor);
+                    }
+                }
+            }
+            
+            // Draw bottom removal area
+            if (removeBottom > 0)
+            {
+                for (int row = 0; row < removeBottom; row++)
+                {
+                    for (int col = removeLeft; col < currentWidth - removeRight; col++)
+                    {
+                        DrawRemovalTile(col, row, startX, startZ, heightCache, heightSettings, removeColor);
+                    }
+                }
+            }
+            
+            // Draw top removal area
+            if (removeTop > 0)
+            {
+                for (int row = currentHeight - removeTop; row < currentHeight; row++)
+                {
+                    for (int col = removeLeft; col < currentWidth - removeRight; col++)
+                    {
+                        DrawRemovalTile(col, row, startX, startZ, heightCache, heightSettings, removeColor);
+                    }
+                }
+            }
+            
+            // Draw border around removal areas
+            Handles.color = removeBorder;
+            float borderY = heightSettings.offset + 0.08f;
+            
+            // Left border
+            if (removeLeft > 0)
+            {
+                Vector3 start = new Vector3(startX + removeLeft * TILE_SIZE, borderY, startZ);
+                Vector3 end = new Vector3(startX + removeLeft * TILE_SIZE, borderY, startZ + currentHeight * TILE_SIZE);
+                Handles.DrawLine(start, end, 3f);
+            }
+            
+            // Right border
+            if (removeRight > 0)
+            {
+                Vector3 start = new Vector3(startX + (currentWidth - removeRight) * TILE_SIZE, borderY, startZ);
+                Vector3 end = new Vector3(startX + (currentWidth - removeRight) * TILE_SIZE, borderY, startZ + currentHeight * TILE_SIZE);
+                Handles.DrawLine(start, end, 3f);
+            }
+            
+            // Bottom border
+            if (removeBottom > 0)
+            {
+                Vector3 start = new Vector3(startX, borderY, startZ + removeBottom * TILE_SIZE);
+                Vector3 end = new Vector3(startX + currentWidth * TILE_SIZE, borderY, startZ + removeBottom * TILE_SIZE);
+                Handles.DrawLine(start, end, 3f);
+            }
+            
+            // Top border
+            if (removeTop > 0)
+            {
+                Vector3 start = new Vector3(startX, borderY, startZ + (currentHeight - removeTop) * TILE_SIZE);
+                Vector3 end = new Vector3(startX + currentWidth * TILE_SIZE, borderY, startZ + (currentHeight - removeTop) * TILE_SIZE);
+                Handles.DrawLine(start, end, 3f);
+            }
+        }
+        
+        private static void DrawRemovalTile(int col, int row, float startX, float startZ, TerrainHeightCache heightCache, TerrainHeightSettings heightSettings, Color color)
+        {
+            float tileHeight = ResolveTileHeight(heightCache, heightSettings, col, row);
+            FillTileQuad(s_TileVerticesOverlay, startX, startZ, col, row, heightCache, heightSettings, tileHeight, 0.07f);
+
+            Handles.DrawSolidRectangleWithOutline(s_TileVerticesOverlay, color, Color.clear);
+            
+            // Draw X pattern
+            Handles.color = new Color(1f, 0f, 0f, 0.5f);
+            Handles.DrawLine(
+                new Vector3(startX + col * TILE_SIZE, tileHeight + 0.08f, startZ + row * TILE_SIZE),
+                new Vector3(startX + (col + 1) * TILE_SIZE, tileHeight + 0.08f, startZ + (row + 1) * TILE_SIZE), 2f
+            );
+            Handles.DrawLine(
+                new Vector3(startX + (col + 1) * TILE_SIZE, tileHeight + 0.08f, startZ + row * TILE_SIZE),
+                new Vector3(startX + col * TILE_SIZE, tileHeight + 0.08f, startZ + (row + 1) * TILE_SIZE), 2f
+            );
+        }
+        
+        private static void DrawTerrainButton(TerrainType terrain, bool isUsed, bool showUsageIndicator = true)
+        {
+            Rect rowRect = EditorGUILayout.BeginHorizontal();
+            if (isUsed)
+            {
+                Color highlight = new Color(1f, 0.95f, 0.65f, 0.35f);
+                EditorGUI.DrawRect(rowRect, highlight);
+            }
+            
+            // Draw color swatch — route through GetColorOrFallback so editor-only overrides apply
+            Rect colorRect = GUILayoutUtility.GetRect(20, 20, GUILayout.Width(20));
+            EditorGUI.DrawRect(colorRect, TerrainDefinitions.GetColorOrFallback(terrain.tid));
+            bool isOverridden = TileColorOverridesProvider.TryGetOverride(terrain.tid, out _);
+            if (isOverridden)
+            {
+                // Bright outline so overridden tiles read as "not the game's color".
+                Color outline = new Color(1f, 0.85f, 0.2f, 1f);
+                EditorGUI.DrawRect(new Rect(colorRect.x, colorRect.y, colorRect.width, 1), outline);
+                EditorGUI.DrawRect(new Rect(colorRect.x, colorRect.yMax - 1, colorRect.width, 1), outline);
+                EditorGUI.DrawRect(new Rect(colorRect.x, colorRect.y, 1, colorRect.height), outline);
+                EditorGUI.DrawRect(new Rect(colorRect.xMax - 1, colorRect.y, 1, colorRect.height), outline);
+            }
+            else
+            {
+                EditorGUI.DrawRect(colorRect, new Color(0, 0, 0, 0.2f)); // Subtle darken (existing look)
+            }
+            
+            if (showUsageIndicator)
+            {
+                if (isUsed)
+                {
+                    GUIStyle starStyle = new GUIStyle(EditorStyles.label);
+                    starStyle.normal.textColor = Color.yellow;
+                    starStyle.fontStyle = FontStyle.Bold;
+                    GUILayout.Label("★", starStyle, GUILayout.Width(20));
+                }
+                else
+                {
+                    GUILayout.Label("", GUILayout.Width(20));
+                }
+            }
+            
+            // Terrain button
+            Color previousBg = GUI.backgroundColor;
+            if (terrain.tid == selectedBrushTerrain)
+            {
+                GUI.backgroundColor = Color.cyan;
+            }
+            else
+            {
+                GUI.backgroundColor = Color.white;
+            }
+            
+            string displayName = TerrainDefinitions.GetDisplayString(terrain.tid);
+            
+            if (GUILayout.Button(displayName, EditorStyles.toolbarButton))
+            {
+                selectedBrushTerrain = terrain.tid;
+                SceneView.RepaintAll();
+            }
+
+            GUI.backgroundColor = previousBg;
+
+            // Per-row override shortcut: opens the Tile Color Overrides window pre-filtered to
+            // this tid so the user lands on the right row immediately. Tooltip explains the
+            // feature on hover so it's discoverable without docs.
+            GUIContent gearContent = new GUIContent("…",
+                isOverridden
+                    ? "Edit / clear this tile's editor-only color override"
+                    : "Set an editor-only color override for this tile");
+            if (GUILayout.Button(gearContent, EditorStyles.toolbarButton, GUILayout.Width(22)))
+            {
+                TileColorOverridesWindow.ShowForTerrain(terrain.tid);
+            }
+
+            EditorGUILayout.EndHorizontal();
+        }
+
+        private static void LoadTerrainFromActiveScene(bool silentIfNotFound = false)
+        {
+            MonoBehaviour target = FindMapSettingComponent();
+            if (target == null)
+            {
+                if (!silentIfNotFound)
+                {
+                    Debug.LogWarning("[TerrainPaintTool] MapSetting component was not found in the active scene.");
+                }
+                return;
+            }
+
+            SerializedObject serializedObject = new SerializedObject(target);
+            serializedObject.Update();
+            SerializedProperty property = serializedObject.FindProperty("m_MapTerrain") ?? serializedObject.FindProperty("MapTerrain");
+            if (property != null && property.objectReferenceValue != null)
+            {
+                SelectTerrainFromObject(property.objectReferenceValue as ScriptableObject);
+                serializedObject.Dispose();
+                return;
+            }
+            serializedObject.Dispose();
+
+            // Fallback: use reflection to read public field.
+            var field = target.GetType().GetField("m_MapTerrain", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic) ??
+                        target.GetType().GetField("MapTerrain", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (field != null)
+            {
+                if (field.GetValue(target) is ScriptableObject asset)
+                {
+                    SelectTerrainFromObject(asset);
+                    return;
+                }
+            }
+
+            if (!silentIfNotFound)
+            {
+                Debug.LogWarning("[TerrainPaintTool] MapSetting component found but no MapTerrain reference assigned.");
+            }
+        }
+
+        private static MonoBehaviour FindMapSettingComponent()
+        {
+            // Look for MapSetting component in active scene only
+            Scene activeScene = SceneManager.GetActiveScene();
+            if (!activeScene.IsValid() || !activeScene.isLoaded)
+            {
+                return null;
+            }
+
+            // Search through all root GameObjects in the active scene
+            foreach (GameObject root in activeScene.GetRootGameObjects())
+            {
+                if (root == null) continue;
+
+                // Check the root object and all its children for MapSetting component
+                foreach (MonoBehaviour behaviour in root.GetComponentsInChildren<MonoBehaviour>(true))
+                {
+                    if (behaviour == null) continue;
+
+                    Type behaviourType = behaviour.GetType();
+                    // Check if the type name is MapSetting (works even if from different assembly)
+                    if (behaviourType.Name == "MapSetting")
+                    {
+                        return behaviour;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        private static void SetSelectedTerrain(TerrainAssetAdapter adapter)
+        {
+            if (adapter == null)
+            {
+                selectedTerrain = null;
+                lastCachedTerrain = null;
+                InvalidateVirtualGrid(null);
+                TerrainRegionCache.ClearAll();
+                s_LabelNodes.Clear();
+                labelAlphaStates.Clear();
+                paintableTerrainsDirty = true;
+                SaveSettings();
+                SceneView.RepaintAll();
+                instance?.Repaint();
+                GUI.changed = true;
+                OnTerrainSelectionChanged?.Invoke(null);
+                return;
+            }
+
+            selectedTerrain = adapter;
+            PruneMeshCaches(selectedTerrain);
+            ApplyTerrainHeightForSelection();
+            lastCachedTerrain = null;
+            InvalidateVirtualGrid(selectedTerrain);
+            TerrainRegionCache.ClearAll();
+            s_LabelNodes.Clear();
+            labelAlphaStates.Clear();
+            paintableTerrainsDirty = true;
+            SaveSettings();
+            SceneView.RepaintAll();
+            instance?.Repaint();
+            OnTerrainSelectionChanged?.Invoke(adapter);
+            GUI.changed = true;
+        }
+
+        private static void SelectTerrainFromObject(ScriptableObject terrainAsset)
+        {
+            if (terrainAsset == null)
+            {
+                return;
+            }
+
+            var adapter = TerrainAssetAdapter.FromObject(terrainAsset);
+            if (adapter == null)
+            {
+                Debug.LogError($"[TerrainPaintTool] Failed to adapt terrain asset '{terrainAsset.name}'. Ensure it derives from Bridge.MapTerrain.", terrainAsset);
+                return;
+            }
+
+            SetSelectedTerrain(adapter);
+        }
+
+        // TIDs are Japanese in the shipped XML; "Ground" labels are MSBT-localized. TID_平地
+        // (Heichi, "plain") is the canonical neutral floor tile. TID_草原 (grassland) is a fine
+        // backup when 平地 isn't present.
+        private static readonly string[] PreferredDefaultBrushTids = { "TID_平地", "TID_草原" };
+
+        private static string ChooseDefaultBrushTerrain()
+        {
+            var paintable = GetPaintableTerrains();
+            if (paintable.Count == 0) return string.Empty;
+
+            for (int p = 0; p < PreferredDefaultBrushTids.Length; p++)
+            {
+                string preferred = PreferredDefaultBrushTids[p];
+                for (int i = 0; i < paintable.Count; i++)
+                {
+                    if (string.Equals(paintable[i].tid, preferred, StringComparison.Ordinal))
+                    {
+                        return paintable[i].tid;
+                    }
+                }
+            }
+
+            // Preferred TIDs aren't in the loaded set — fall back to the first paintable terrain
+            // that isn't an Off-Limits variant so we don't startle the user with TID_進入不可.
+            for (int i = 0; i < paintable.Count; i++)
+            {
+                string tid = paintable[i].tid;
+                if (!string.IsNullOrEmpty(tid) && !tid.StartsWith("TID_進入不可", StringComparison.Ordinal))
+                {
+                    return tid;
+                }
+            }
+
+            return paintable[0].tid;
+        }
+
+        private static List<TerrainType> GetPaintableTerrains()
+        {
+            if (paintableTerrainsDirty)
+            {
+                paintableTerrainsCache.Clear();
+                var definitions = TerrainDefinitions.GetAllTerrains();
+                if (definitions.Count > 0)
+                {
+                    for (int i = 0; i < definitions.Count; i++)
+                    {
+                        var terrain = definitions[i];
+                        if (terrain != null && !IsEmptyTerrain(terrain.tid))
+                        {
+                            paintableTerrainsCache.Add(terrain);
+                        }
+                    }
+                }
+                else if (selectedTerrain?.m_Terrains != null)
+                {
+                    HashSet<string> uniqueTids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (string tid in selectedTerrain.m_Terrains)
+                    {
+                        if (IsEmptyTerrain(tid) || !uniqueTids.Add(tid))
+                        {
+                            continue;
+                        }
+
+                        paintableTerrainsCache.Add(CreateFallbackTerrain(tid));
+                    }
+                }
+
+                paintableTerrainsDirty = false;
+            }
+
+            return paintableTerrainsCache;
+        }
+
+        private static TerrainType CreateFallbackTerrain(string tid)
+        {
+            Color color = TerrainDefinitions.GetColorOrFallback(tid);
+            return new TerrainType(
+                tid,
+                tid,
+                Mathf.Clamp(Mathf.RoundToInt(color.r * 255f), 0, 255),
+                Mathf.Clamp(Mathf.RoundToInt(color.g * 255f), 0, 255),
+                Mathf.Clamp(Mathf.RoundToInt(color.b * 255f), 0, 255));
+        }
+
+        // Reusable GUI styles
+        private static GUIStyle s_LabelStyle;
+        private static GUIStyle s_LabelStyleSmall;
+        private static GUIStyle s_LabelStyleHover;
+    }
+
+}
