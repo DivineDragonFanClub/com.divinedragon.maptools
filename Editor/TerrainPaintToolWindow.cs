@@ -216,6 +216,8 @@ namespace DivineDragon.MapTools
         private static readonly Dictionary<TerrainAssetAdapter, List<TerrainIsland>> islandCache = new Dictionary<TerrainAssetAdapter, List<TerrainIsland>>();
         private static TerrainAssetAdapter lastCachedTerrain = null;
         private static float lastIslandCameraDistance = -1f;
+        private static int lastKnownWidth = -1;
+        private static int lastKnownHeight = -1;
         private static float lastFrameTime = 0f;
         
         // Screen-space relaxation state/tunables
@@ -1001,6 +1003,7 @@ namespace DivineDragon.MapTools
                 SetSharedEditorMode((SharedEditorMode)modeIndex);
             }
             EditorGUILayout.Space(6);
+            ValidateTerrainDimensions();
 
             // Top-level tabs
             uiTabIndex = GUILayout.Toolbar(uiTabIndex, new[] { "Main", "Settings", "Advanced" });
@@ -1465,6 +1468,7 @@ namespace DivineDragon.MapTools
             }
 
             PruneMeshCaches(selectedTerrain);
+            ValidateTerrainDimensions();
 
             TerrainVirtualGrid currentGrid = GetVirtualGrid(selectedTerrain);
             if (currentGrid == null)
@@ -3451,6 +3455,8 @@ namespace DivineDragon.MapTools
             {
                 selectedTerrain = null;
                 lastCachedTerrain = null;
+                lastKnownWidth = -1;
+                lastKnownHeight = -1;
                 InvalidateVirtualGrid(null);
                 TerrainRegionCache.ClearAll();
                 s_LabelNodes.Clear();
@@ -3468,6 +3474,8 @@ namespace DivineDragon.MapTools
             PruneMeshCaches(selectedTerrain);
             ApplyTerrainHeightForSelection();
             lastCachedTerrain = null;
+            lastKnownWidth = adapter.Width;
+            lastKnownHeight = adapter.Height;
             InvalidateVirtualGrid(selectedTerrain);
             TerrainRegionCache.ClearAll();
             s_LabelNodes.Clear();
@@ -3478,6 +3486,35 @@ namespace DivineDragon.MapTools
             instance?.Repaint();
             OnTerrainSelectionChanged?.Invoke(adapter);
             GUI.changed = true;
+        }
+
+        private static void ValidateTerrainDimensions()
+        {
+            if (selectedTerrain == null)
+            {
+                lastKnownWidth = -1;
+                lastKnownHeight = -1;
+                return;
+            }
+
+            int currentWidth = selectedTerrain.m_Width;
+            int currentHeight = selectedTerrain.m_Height;
+
+            if (currentWidth == lastKnownWidth && currentHeight == lastKnownHeight)
+            {
+                return;
+            }
+
+            lastKnownWidth = currentWidth;
+            lastKnownHeight = currentHeight;
+
+            InvalidateVirtualGrid(selectedTerrain);
+            TerrainRegionCache.ClearAll();
+            islandCache.Clear();
+            lastCachedTerrain = null;
+            s_LabelNodes.Clear();
+            labelAlphaStates.Clear();
+            paintableTerrainsDirty = true;
         }
 
         private static void SelectTerrainFromObject(ScriptableObject terrainAsset)
