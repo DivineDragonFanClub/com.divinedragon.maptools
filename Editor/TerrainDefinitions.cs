@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using DivineDragon.Msbt.Editor;
 using UnityEditor;
 using UnityEngine;
 
@@ -53,7 +54,7 @@ namespace DivineDragon.MapTools
             {
                 return null;
             }
-            return TerrainLocalizer.GetLocalizedName(terrain.name);
+            return MsbtProvider.Get(MapToolsMsbtFiles.GameData, new MessageId(terrain.name), MsbtProvider.CurrentLanguage);
         }
 
         /// <summary>

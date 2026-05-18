@@ -6,6 +6,7 @@ using System.Xml.Linq;
 using UnityEditor;
 using UnityEngine;
 using DivineDragon;
+using DivineDragon.Msbt.Editor;
 
 namespace DivineDragon.MapTools
 {
@@ -24,7 +25,7 @@ namespace DivineDragon.MapTools
             yield return new SupportAsset(MapToolsPaths.GameDataShareAssetPath + "/Skill.xml", MapToolsPaths.GameDataAssetRoot + "/skill.xml.bundle");
             yield return new SupportAsset(TerrainDefinitions.TerrainXmlAssetRelativePath, MapToolsPaths.TerrainXmlBundlePath);
 
-            string lang = TerrainLocalizer.CurrentLanguage;
+            string lang = MsbtProvider.CurrentLanguage.Code;
             if (!string.IsNullOrEmpty(lang) && lang.Length >= 2)
             {
                 string country = lang.Substring(0, 2).ToUpperInvariant();
@@ -49,6 +50,7 @@ namespace DivineDragon.MapTools
         private bool isDragChecking;
         private bool dragCheckValue;
         private bool showAdvancedColumns;
+        private string chapterSearch = string.Empty;
 
         private const float RowHeight = 20f;
         private const float ColumnCheckboxWidth = 22f;
@@ -61,7 +63,7 @@ namespace DivineDragon.MapTools
         private const string ShowAdvancedColumnsPrefsKey = "DivineDragon.MapTools.ChapterDumper.ShowAdvancedColumns";
         private const string AddressablesRootFolder = "Assets/Share/Addressables";
 
-        [MenuItem("Window/Map Tools/Chapter Dumper")]
+        [MenuItem("Map Tools/Chapter Dumper")]
         public static void ShowWindow()
         {
             var window = GetWindow<ChapterDumperWindow>(WindowTitle);
@@ -72,19 +74,19 @@ namespace DivineDragon.MapTools
         {
             showAdvancedColumns = EditorPrefs.GetBool(ShowAdvancedColumnsPrefsKey, false);
             RefreshChapterLocation();
-            TerrainLocalizer.OnLanguageChanged += OnLanguageChanged;
+            MsbtProvider.OnLanguageChanged += OnLanguageChanged;
             EditorApplication.projectChanged += OnProjectChanged;
         }
 
         private void OnDisable()
         {
-            TerrainLocalizer.OnLanguageChanged -= OnLanguageChanged;
+            MsbtProvider.OnLanguageChanged -= OnLanguageChanged;
             EditorApplication.projectChanged -= OnProjectChanged;
         }
 
         private void OnProjectChanged()
         {
-            TerrainLocalizer.InvalidateCache();
+            MsbtProvider.InvalidateCache();
             RefreshTitles();
             RefreshDumpStatus();
             Repaint();
@@ -125,30 +127,21 @@ namespace DivineDragon.MapTools
                 return;
             }
 
-            using (new EditorGUILayout.HorizontalScope())
+            using (new EditorGUILayout.HorizontalScope(EditorStyles.toolbar))
             {
-                EditorGUILayout.LabelField("Chapter XML Status", EditorStyles.boldLabel);
                 GUILayout.FlexibleSpace();
-                if (GUILayout.Button(EditorGUIUtility.IconContent("_Popup"), GUILayout.Width(24), GUILayout.Height(20)))
+                if (GUILayout.Button(EditorGUIUtility.IconContent("_Popup"), EditorStyles.toolbarButton, GUILayout.Width(28)))
                 {
                     ShowSettingsMenu();
                 }
             }
 
-            if (!string.IsNullOrEmpty(chapterAssetPath))
+            if (string.IsNullOrEmpty(chapterAssetPath))
             {
-                EditorGUILayout.HelpBox($"Found at {chapterAssetPath}", MessageType.Info);
-            }
-            else
-            {
-                EditorGUILayout.HelpBox("Chapter.xml not found under Assets. Click the button below to extract it.", MessageType.Warning);
-            }
-
-            using (new EditorGUI.DisabledScope(isExtracting || !string.IsNullOrEmpty(chapterAssetPath)))
-            {
-                if (GUILayout.Button("Extract Chapter.xml"))
+                EditorGUILayout.HelpBox("Chapter.xml not found. Open Set up Map Tools to extract it.", MessageType.Warning);
+                if (GUILayout.Button("Open Setup"))
                 {
-                    ExtractChapterXml();
+                    MapToolsSetupWindow.Open();
                 }
             }
 
@@ -195,26 +188,54 @@ namespace DivineDragon.MapTools
             }
 
             EditorGUILayout.Space();
-            EditorGUILayout.LabelField($"Chapters ({chapters.Count})", EditorStyles.boldLabel);
+
+            int matchingCount = 0;
+            for (int i = 0; i < chapters.Count; i++)
+            {
+                if (MatchesChapterSearch(chapters[i])) matchingCount++;
+            }
+
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                string label = string.IsNullOrEmpty(chapterSearch)
+                    ? $"Chapters ({chapters.Count})"
+                    : $"Chapters ({matchingCount} / {chapters.Count})";
+                EditorGUILayout.LabelField(label, EditorStyles.boldLabel);
+                GUILayout.FlexibleSpace();
+                chapterSearch = GUILayout.TextField(chapterSearch ?? string.Empty,
+                    EditorStyles.toolbarSearchField, GUILayout.MinWidth(180));
+            }
 
             DrawTableHeader();
 
             listScroll = EditorGUILayout.BeginScrollView(listScroll);
             for (int i = 0; i < chapters.Count; i++)
             {
+                if (!MatchesChapterSearch(chapters[i])) continue;
                 DrawRow(chapters[i]);
             }
             EditorGUILayout.EndScrollView();
         }
 
+        private bool MatchesChapterSearch(ChapterRecord chapter)
+        {
+            if (string.IsNullOrEmpty(chapterSearch)) return true;
+            if (chapter.Cid != null && chapter.Cid.IndexOf(chapterSearch, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            if (chapter.Title != null && chapter.Title.IndexOf(chapterSearch, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            return false;
+        }
+
         private void DrawTableHeader()
         {
+            int matchingCount = 0;
             int checkedCount = 0;
             for (int i = 0; i < chapters.Count; i++)
             {
+                if (!MatchesChapterSearch(chapters[i])) continue;
+                matchingCount++;
                 if (chapters[i].Checked) checkedCount++;
             }
-            bool allChecked = checkedCount == chapters.Count && chapters.Count > 0;
+            bool allChecked = checkedCount == matchingCount && matchingCount > 0;
             bool isMixed = checkedCount > 0 && !allChecked;
 
             using (new EditorGUILayout.HorizontalScope(EditorStyles.helpBox))
@@ -227,6 +248,7 @@ namespace DivineDragon.MapTools
                 {
                     for (int i = 0; i < chapters.Count; i++)
                     {
+                        if (!MatchesChapterSearch(chapters[i])) continue;
                         chapters[i].Checked = toggled;
                     }
                 }
@@ -373,6 +395,26 @@ namespace DivineDragon.MapTools
         private void ShowSettingsMenu()
         {
             var menu = new GenericMenu();
+
+            Language[] languages = MsbtProvider.AvailableLanguages;
+            if (languages.Length > 0)
+            {
+                Language currentLang = MsbtProvider.CurrentLanguage;
+                foreach (Language lang in languages)
+                {
+                    Language captured = lang;
+                    menu.AddItem(
+                        new GUIContent($"Language/{lang.Code}"),
+                        lang.Equals(currentLang),
+                        () => MsbtProvider.SetLanguage(captured));
+                }
+            }
+            else
+            {
+                menu.AddDisabledItem(new GUIContent("Language/(none extracted)"));
+            }
+
+            menu.AddSeparator(string.Empty);
 
             bool isSuppressed = EditorPrefs.GetBool(SkipBulkWarningPrefsKey, false);
             menu.AddItem(
@@ -554,9 +596,16 @@ namespace DivineDragon.MapTools
                     }
                 }
 
+                int patchDumped = MsbtDumper.DumpPatchMessages(MsbtProvider.CurrentLanguage.Code);
+
                 string statusMessage =
                     $"Queued {queuedPaths.Count} unique bundles across {chaptersWithAnyTargets} chapters.\n" +
                     $"Scenes: {sceneFound} found, {sceneMissing} missing. Terrains: {terrainFound} found, {terrainMissing} missing.";
+
+                if (patchDumped > 0)
+                {
+                    statusMessage += $"\nDumped {patchDumped} patch MSBT entries to <lang>_dumped folders.";
+                }
 
                 if (!overallSuccess)
                 {
@@ -596,7 +645,7 @@ namespace DivineDragon.MapTools
 
             try
             {
-                bool success = Dumper.ExtractMultipleAssets(bundlePaths);
+                bool success = Dumper.ExtractAssets(bundlePaths.ToArray());
                 AssetDatabase.Refresh();
 
                 if (!success)
@@ -680,36 +729,6 @@ namespace DivineDragon.MapTools
                 }
             }
             return false;
-        }
-
-        private void ExtractChapterXml()
-        {
-            if (!File.Exists(MapToolsPaths.ChapterBundlePath))
-            {
-                lastMessage = $"Bundle not found: {MapToolsPaths.ChapterBundlePath}";
-                return;
-            }
-
-            try
-            {
-                isExtracting = true;
-                EditorUtility.DisplayProgressBar(WindowTitle, "Extracting Chapter.xml...", 0.5f);
-
-                bool success = Dumper.ExtractAssetAtPath(MapToolsPaths.ChapterBundlePath);
-                AssetDatabase.Refresh();
-                RefreshChapterLocation();
-
-                lastMessage = success ? "Extraction completed." : "Extraction failed. Check console for details.";
-            }
-            catch (Exception ex)
-            {
-                lastMessage = $"Extraction error: {ex.Message}";
-            }
-            finally
-            {
-                isExtracting = false;
-                EditorUtility.ClearProgressBar();
-            }
         }
 
         private void RefreshChapterLocation()
@@ -909,8 +928,9 @@ namespace DivineDragon.MapTools
                 : "MCID_" + cid;
 
             // Look up prefix (e.g., "Chapter 1") and title (e.g., "Awake at Last")
-            string prefix = TerrainLocalizer.GetLocalizedName(mcidBase + "_PREFIX");
-            string title = TerrainLocalizer.GetLocalizedName(mcidBase);
+            Language lang = MsbtProvider.CurrentLanguage;
+            string prefix = MapToolsMsbtFiles.GetChapterString(mcidBase + "_PREFIX", lang);
+            string title = MapToolsMsbtFiles.GetChapterString(mcidBase, lang);
 
             // If we got back the key itself, localization wasn't found
             bool hasPrefix = !string.IsNullOrEmpty(prefix) && prefix != mcidBase + "_PREFIX";
