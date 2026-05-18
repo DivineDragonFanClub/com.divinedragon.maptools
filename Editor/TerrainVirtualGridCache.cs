@@ -33,7 +33,16 @@ namespace DivineDragon.MapTools
                 return null;
             }
 
-            if (!s_VirtualGrids.TryGetValue(adapter, out TerrainVirtualGrid grid))
+            if (s_VirtualGrids.TryGetValue(adapter, out TerrainVirtualGrid grid))
+            {
+                if (grid.Width != adapter.Width || grid.Height != adapter.Height)
+                {
+                    Invalidate(adapter);
+                    grid = null;
+                }
+            }
+
+            if (grid == null)
             {
                 string assetKey = GetAssetKey(adapter);
                 grid = TerrainVirtualGrid.Build(adapter, IsEmptyTerrain, assetKey, s_LoggedInsufficientTiles, s_LoggedOverflowTiles);

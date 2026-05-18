@@ -50,8 +50,12 @@ namespace DivineDragon.MapTools
             if (terrains.Count == 0)
             {
                 EditorGUILayout.HelpBox(
-                    "No terrains loaded. Extract terrain.xml.bundle so the editor has tile metadata.",
+                    "No terrains loaded. Open Set up Map Tools to extract tile metadata.",
                     MessageType.Info);
+                if (GUILayout.Button("Open Setup"))
+                {
+                    MapToolsSetupWindow.Open();
+                }
                 return;
             }
 

@@ -4,7 +4,6 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using DivineDragon;
-using DivineDragon.Msbt;
 using DivineDragon.Msbt.Editor;
 using UnityEditor;
 using UnityEditor.SceneManagement;
@@ -216,6 +215,8 @@ namespace DivineDragon.MapTools
         private static readonly Dictionary<TerrainAssetAdapter, List<TerrainIsland>> islandCache = new Dictionary<TerrainAssetAdapter, List<TerrainIsland>>();
         private static TerrainAssetAdapter lastCachedTerrain = null;
         private static float lastIslandCameraDistance = -1f;
+        private static int lastKnownWidth = -1;
+        private static int lastKnownHeight = -1;
         private static float lastFrameTime = 0f;
         
         // Screen-space relaxation state/tunables
@@ -367,8 +368,41 @@ namespace DivineDragon.MapTools
             EditorSceneManager.activeSceneChangedInEditMode += OnActiveSceneChanged;
             EditorApplication.hierarchyChanged -= OnHierarchyChanged;
             EditorApplication.hierarchyChanged += OnHierarchyChanged;
+            MsbtProvider.OnLanguageChanged -= OnPaintLanguageChanged;
+            MsbtProvider.OnLanguageChanged += OnPaintLanguageChanged;
             InvalidateSceneColliderLists();
             LoadSettings();
+        }
+
+        private void OnPaintLanguageChanged()
+        {
+            Repaint();
+            SceneView.RepaintAll();
+        }
+
+        private void ShowPaintToolSettingsMenu()
+        {
+            var menu = new GenericMenu();
+
+            Language[] languages = MsbtProvider.AvailableLanguages;
+            if (languages.Length > 0)
+            {
+                Language currentLang = MsbtProvider.CurrentLanguage;
+                foreach (Language lang in languages)
+                {
+                    Language captured = lang;
+                    menu.AddItem(
+                        new GUIContent($"Language/{lang.Code}"),
+                        lang.Equals(currentLang),
+                        () => MsbtProvider.SetLanguage(captured));
+                }
+            }
+            else
+            {
+                menu.AddDisabledItem(new GUIContent("Language/(none extracted)"));
+            }
+
+            menu.ShowAsContext();
         }
         
         private static void OnUndoRedo()
@@ -736,6 +770,7 @@ namespace DivineDragon.MapTools
             Undo.undoRedoPerformed -= OnUndoRedo;
             EditorSceneManager.activeSceneChangedInEditMode -= OnActiveSceneChanged;
             EditorApplication.hierarchyChanged -= OnHierarchyChanged;
+            MsbtProvider.OnLanguageChanged -= OnPaintLanguageChanged;
             DisposeOverlayMeshes();
             DisposeGridMeshes();
             if (overlayMaterial != null)
@@ -990,7 +1025,16 @@ namespace DivineDragon.MapTools
             scrollPosition = EditorGUILayout.BeginScrollView(scrollPosition);
             
             EditorGUILayout.Space(10);
-            EditorGUILayout.LabelField("Terrain Paint Tool", EditorStyles.boldLabel);
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                EditorGUILayout.LabelField("Terrain Paint Tool", EditorStyles.boldLabel);
+                GUILayout.FlexibleSpace();
+                if (GUILayout.Button(EditorGUIUtility.IconContent("_Popup"),
+                    EditorStyles.toolbarButton, GUILayout.Width(28)))
+                {
+                    ShowPaintToolSettingsMenu();
+                }
+            }
             EditorGUILayout.Space(5);
 
             EditorGUILayout.LabelField("Editor Mode", EditorStyles.miniBoldLabel);
@@ -1001,6 +1045,7 @@ namespace DivineDragon.MapTools
                 SetSharedEditorMode((SharedEditorMode)modeIndex);
             }
             EditorGUILayout.Space(6);
+            ValidateTerrainDimensions();
 
             // Top-level tabs
             uiTabIndex = GUILayout.Toolbar(uiTabIndex, new[] { "Main", "Settings", "Advanced" });
@@ -1113,10 +1158,10 @@ namespace DivineDragon.MapTools
                 EditorGUILayout.Space(10);
                 EditorGUILayout.LabelField("Terrain Painting", EditorStyles.boldLabel);
 
-                if (!TerrainDefinitions.HasDefinitions || !TerrainLocalizer.HasLocalization)
+                if (!TerrainDefinitions.HasDefinitions || !MsbtProvider.HasLocalization)
                 {
                     string missingItems = "";
-                    if (!TerrainDefinitions.HasDefinitions && !TerrainLocalizer.HasLocalization)
+                    if (!TerrainDefinitions.HasDefinitions && !MsbtProvider.HasLocalization)
                     {
                         missingItems = "Terrain definitions and localization are missing.";
                     }
@@ -1130,11 +1175,11 @@ namespace DivineDragon.MapTools
                     }
 
                     EditorGUILayout.HelpBox(
-                        $"{missingItems} Extract terrain data so palette colors, names, and localization load correctly.",
+                        $"{missingItems} Open Set up Map Tools to extract palette colors, names, and localization.",
                         MessageType.Warning);
-                    if (GUILayout.Button("Extract Terrain Data"))
+                    if (GUILayout.Button("Open Setup"))
                     {
-                        ExtractTerrainData();
+                        MapToolsSetupWindow.Open();
                     }
                     EditorGUILayout.Space(5);
                 }
@@ -1465,6 +1510,7 @@ namespace DivineDragon.MapTools
             }
 
             PruneMeshCaches(selectedTerrain);
+            ValidateTerrainDimensions();
 
             TerrainVirtualGrid currentGrid = GetVirtualGrid(selectedTerrain);
             if (currentGrid == null)
@@ -3000,99 +3046,6 @@ namespace DivineDragon.MapTools
             return terrainId;
         }
 
-        private static void ExtractTerrainData()
-        {
-            if (!File.Exists(MapToolsPaths.TerrainXmlBundlePath))
-            {
-                EditorUtility.DisplayDialog(
-                    "Terrain Data",
-                    $"Bundle not found at:\n{MapToolsPaths.TerrainXmlBundlePath}\n\nConfigure your game data path in Project Settings → Divine Dragon.",
-                    "OK");
-                return;
-            }
-
-            try
-            {
-                // 1. Extract Terrain.xml
-                EditorUtility.DisplayProgressBar("Terrain Paint Tool", "Extracting Terrain.xml...", 0.2f);
-                bool terrainSuccess = Dumper.ExtractAssetAtPath(MapToolsPaths.TerrainXmlBundlePath);
-
-                if (!terrainSuccess)
-                {
-                    EditorUtility.ClearProgressBar();
-                    EditorUtility.DisplayDialog("Terrain Data", "Terrain.xml extraction failed. Check console for details.", "OK");
-                    return;
-                }
-
-                // 2. Extract and dump GameData.bytes for English
-                EditorUtility.DisplayProgressBar("Terrain Paint Tool", "Extracting English localization...", 0.4f);
-                ExtractGameDataForLanguage(MsbtPaths.EnglishMessageBundlePath, MsbtPaths.EnglishExtractedPath, MsbtPaths.EnglishDumpedPath);
-
-                // 3. Extract and dump GameData.bytes for Japanese
-                EditorUtility.DisplayProgressBar("Terrain Paint Tool", "Extracting Japanese localization...", 0.6f);
-                ExtractGameDataForLanguage(MsbtPaths.JapaneseMessageBundlePath, MsbtPaths.JapaneseExtractedPath, MsbtPaths.JapaneseDumpedPath);
-
-                EditorUtility.ClearProgressBar();
-
-                // 4. Refresh and invalidate caches
-                AssetDatabase.Refresh();
-                TerrainDefinitions.InvalidateCache();
-                TerrainLocalizer.InvalidateCache();
-
-                EditorUtility.DisplayDialog(
-                    "Terrain Data",
-                    $"Terrain data extracted successfully:\n• Terrain.xml\n• English localization\n• Japanese localization",
-                    "OK");
-            }
-            catch (Exception ex)
-            {
-                EditorUtility.ClearProgressBar();
-                Debug.LogError($"[TerrainPaintTool] Failed to extract terrain data: {ex}");
-                EditorUtility.DisplayDialog("Terrain Data", $"Extraction error:\n{ex.Message}", "OK");
-            }
-        }
-
-        private static void ExtractGameDataForLanguage(string bundleFolderPath, string extractedPath, string dumpedPath)
-        {
-            string gameDataBundle = Path.Combine(bundleFolderPath, "GameData.bytes.bundle");
-
-            if (!File.Exists(gameDataBundle))
-            {
-                Debug.LogWarning($"[TerrainPaintTool] GameData bundle not found at: {gameDataBundle}");
-                return;
-            }
-
-            // Extract the bundle
-            bool extractSuccess = Dumper.ExtractAssetAtPath(gameDataBundle);
-            if (!extractSuccess)
-            {
-                Debug.LogWarning($"[TerrainPaintTool] Failed to extract GameData bundle: {gameDataBundle}");
-                return;
-            }
-
-            // Dump to .txt
-            string bytesPath = Path.Combine(extractedPath, "GameData.bytes");
-            if (File.Exists(bytesPath))
-            {
-                try
-                {
-                    Directory.CreateDirectory(dumpedPath);
-                    MessageBundle bundle = MessageBundle.Load(bytesPath);
-                    string script = bundle.ToAstraScript();
-                    File.WriteAllText(Path.Combine(dumpedPath, "GameData.txt"), script);
-                    Debug.Log($"[TerrainPaintTool] Dumped GameData.txt to: {dumpedPath}");
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogWarning($"[TerrainPaintTool] Failed to dump GameData: {ex.Message}");
-                }
-            }
-            else
-            {
-                Debug.LogWarning($"[TerrainPaintTool] Extracted bytes file not found at: {bytesPath}");
-            }
-        }
-        
         private static void DrawResizePreview(int currentWidth, int currentHeight, float startX, float startZ, TerrainHeightCache heightCache, TerrainHeightSettings heightSettings)
         {
             if (selectedTerrain == null) return;
@@ -3451,6 +3404,8 @@ namespace DivineDragon.MapTools
             {
                 selectedTerrain = null;
                 lastCachedTerrain = null;
+                lastKnownWidth = -1;
+                lastKnownHeight = -1;
                 InvalidateVirtualGrid(null);
                 TerrainRegionCache.ClearAll();
                 s_LabelNodes.Clear();
@@ -3468,6 +3423,8 @@ namespace DivineDragon.MapTools
             PruneMeshCaches(selectedTerrain);
             ApplyTerrainHeightForSelection();
             lastCachedTerrain = null;
+            lastKnownWidth = adapter.Width;
+            lastKnownHeight = adapter.Height;
             InvalidateVirtualGrid(selectedTerrain);
             TerrainRegionCache.ClearAll();
             s_LabelNodes.Clear();
@@ -3478,6 +3435,35 @@ namespace DivineDragon.MapTools
             instance?.Repaint();
             OnTerrainSelectionChanged?.Invoke(adapter);
             GUI.changed = true;
+        }
+
+        private static void ValidateTerrainDimensions()
+        {
+            if (selectedTerrain == null)
+            {
+                lastKnownWidth = -1;
+                lastKnownHeight = -1;
+                return;
+            }
+
+            int currentWidth = selectedTerrain.m_Width;
+            int currentHeight = selectedTerrain.m_Height;
+
+            if (currentWidth == lastKnownWidth && currentHeight == lastKnownHeight)
+            {
+                return;
+            }
+
+            lastKnownWidth = currentWidth;
+            lastKnownHeight = currentHeight;
+
+            InvalidateVirtualGrid(selectedTerrain);
+            TerrainRegionCache.ClearAll();
+            islandCache.Clear();
+            lastCachedTerrain = null;
+            s_LabelNodes.Clear();
+            labelAlphaStates.Clear();
+            paintableTerrainsDirty = true;
         }
 
         private static void SelectTerrainFromObject(ScriptableObject terrainAsset)
