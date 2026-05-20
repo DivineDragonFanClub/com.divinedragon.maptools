@@ -49,7 +49,7 @@ namespace DivineDragon.MapTools
         private const string PREFS_GRID_MODE = "TerrainMinimap_GridMode";
         private const string PREFS_ORIENTATION_MODE = "TerrainMinimap_OrientationMode";
 
-        [MenuItem("Map Tools/Terrain Minimap")]
+        [MenuItem("Map Tools/Terrain Minimap", priority = 21)]
         public static void ShowWindow()
         {
             // Create a new instance each time (allows multiple windows)

@@ -17,11 +17,11 @@ namespace DivineDragon.MapTools
         private bool showOnlyOverridden;
         private Vector2 scroll;
 
-        [MenuItem("Map Tools/Tile Color Overrides")]
+        [MenuItem("Map Tools/Tile Color Overrides", priority = 20)]
         public static void ShowWindow()
         {
             var window = GetWindow<TileColorOverridesWindow>();
-            window.titleContent = new GUIContent("Tile Color Overrides");
+            window.titleContent = new GUIContent("Tile Color Overrides (Editor)");
             window.minSize = new Vector2(420, 320);
             window.Show();
         }
@@ -33,7 +33,7 @@ namespace DivineDragon.MapTools
         public static void ShowForTerrain(string tid)
         {
             var window = GetWindow<TileColorOverridesWindow>();
-            window.titleContent = new GUIContent("Tile Color Overrides");
+            window.titleContent = new GUIContent("Tile Color Overrides (Editor)");
             window.minSize = new Vector2(420, 320);
             window.searchText = tid ?? string.Empty;
             window.showOnlyOverridden = false;
@@ -44,6 +44,7 @@ namespace DivineDragon.MapTools
         private void OnGUI()
         {
             DrawToolbar();
+            DrawScopeBanner();
             DrawHeader();
 
             IReadOnlyList<TerrainType> terrains = TerrainDefinitions.GetAllTerrains();
@@ -108,6 +109,14 @@ namespace DivineDragon.MapTools
             }
 
             EditorGUILayout.EndHorizontal();
+        }
+
+        private void DrawScopeBanner()
+        {
+            EditorGUILayout.HelpBox(
+                "Editor-only — these overrides recolor tiles in Map Tools views only and are " +
+                "never written to shipped game data.",
+                MessageType.Info);
         }
 
         private void DrawHeader()
@@ -218,7 +227,7 @@ namespace DivineDragon.MapTools
         {
             EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
             EditorGUILayout.LabelField(
-                $"{TileColorOverridesProvider.Count} override(s) active. Editor-only — never affects shipped game data.",
+                $"{TileColorOverridesProvider.Count} override(s) active.",
                 EditorStyles.miniLabel);
             EditorGUILayout.EndHorizontal();
         }

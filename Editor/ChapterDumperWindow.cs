@@ -63,7 +63,7 @@ namespace DivineDragon.MapTools
         private const string ShowAdvancedColumnsPrefsKey = "DivineDragon.MapTools.ChapterDumper.ShowAdvancedColumns";
         private const string AddressablesRootFolder = "Assets/Share/Addressables";
 
-        [MenuItem("Map Tools/Chapter Dumper")]
+        [MenuItem("Map Tools/Chapter Dumper", priority = 0)]
         public static void ShowWindow()
         {
             var window = GetWindow<ChapterDumperWindow>(WindowTitle);

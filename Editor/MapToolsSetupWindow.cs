@@ -15,6 +15,7 @@ namespace DivineDragon.MapTools
 
         private bool showAdvanced;
         private string lastActionMessage;
+        private Vector2 scroll;
 
         [MenuItem("Map Tools/Set up Map Tools", priority = -100)]
         public static void ShowWindow() => Open();
@@ -38,17 +39,19 @@ namespace DivineDragon.MapTools
 
         private void OnGUI()
         {
+            scroll = EditorGUILayout.BeginScrollView(scroll);
+
             DrawPathSection();
 
-            if (!MapToolsPaths.IsConfigured)
+            if (MapToolsPaths.IsConfigured)
             {
-                return;
+                DrawLanguageSection();
+                DrawDivider();
+                DrawPrimarySection();
+                DrawAdvancedSection();
             }
 
-            DrawLanguageSection();
-            DrawDivider();
-            DrawPrimarySection();
-            DrawAdvancedSection();
+            EditorGUILayout.EndScrollView();
         }
 
         private void DrawLanguageSection()
@@ -63,8 +66,7 @@ namespace DivineDragon.MapTools
             string[] labels = new string[source.Count];
             for (int i = 0; i < source.Count; i++)
             {
-                string code = source[i].Code;
-                labels[i] = (code == "USen" || code == "JPja") ? $"{code} (main)" : code;
+                labels[i] = source[i].Code;
             }
 
             int currentIndex = 0;
