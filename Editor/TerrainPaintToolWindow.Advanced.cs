@@ -402,7 +402,8 @@ namespace DivineDragon.MapTools
                 }
             }
             
-            // Prepare the target array, seeding everything with MTID_NoEntry for cleaner padding
+            // Prepare the content grid (logical newWidth x newHeight), seeding everything with
+            // MTID_NoEntry for cleaner padding within the visible map area
             int newCount = Mathf.Max(0, newTerrainWidth * newTerrainHeight);
             string[] newTerrains = new string[newCount];
             for (int i = 0; i < newCount; i++)
@@ -465,11 +466,29 @@ namespace DivineDragon.MapTools
                 }
             }
 
+            // Rebuild as a fixed 32x32 (1024-tile) array, matching the official map format.
+            // Cells outside the visible newWidth x newHeight bounds are padded with TID_無し
+            // so the serialized Terrains list always stays at 1024 elements.
+            string[] result = new string[1024];
+            for (int i = 0; i < 1024; i++)
+            {
+                result[i] = EmptyTerrainTid;
+            }
+            for (int y = 0; y < newTerrainHeight; y++)
+            {
+                for (int x = 0; x < newTerrainWidth; x++)
+                {
+                    int contentIndex = y * newTerrainWidth + x;
+                    int paddedIndex = y * 32 + x;
+                    result[paddedIndex] = newTerrains[contentIndex];
+                }
+            }
+
             // Apply changes to terrain
             selectedTerrain.m_Width = newTerrainWidth;
             selectedTerrain.m_Height = newTerrainHeight;
-            selectedTerrain.m_Terrains = newTerrains;
-            
+            selectedTerrain.m_Terrains = result;
+
             MarkTerrainDirty(selectedTerrain);
             s_LabelNodes.Clear();
 
